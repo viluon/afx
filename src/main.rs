@@ -1,27 +1,47 @@
 use eframe::egui;
+use rodio::{dynamic_mixer::DynamicMixer, Decoder, OutputStream, Sink};
 use std::fs::File;
 use std::io::BufReader;
-use rodio::{Decoder, OutputStream, Sink};
 
 fn main() {
     let options = eframe::NativeOptions {
         drag_and_drop_support: true,
         ..Default::default()
     };
+
+    // start a background thread
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (_stream, stream_handle) = OutputStream::try_default().unwrap();
+        while let Ok(file) = rx.recv() {
+            let sink = Sink::try_new(&stream_handle).unwrap();
+            let file = File::open(file).unwrap();
+            let source = Decoder::new(BufReader::new(file)).unwrap();
+            sink.append(source);
+            sink.detach();
+        }
+    });
+
     eframe::run_native(
-        "Native file dialogs and drag-and-drop files",
+        "afx",
         options,
-        Box::new(|_cc| Box::<MyApp>::default()),
+        Box::new(|_cc| {
+            Box::new(Model {
+                play_channel: tx,
+                sinks: vec![],
+                picked_path: None,
+            })
+        }),
     );
 }
 
-#[derive(Default)]
-struct MyApp {
-    dropped_files: Vec<egui::DroppedFile>,
+struct Model {
+    play_channel: std::sync::mpsc::Sender<String>,
+    sinks: Vec<Sink>,
     picked_path: Option<String>,
 }
 
-impl eframe::App for MyApp {
+impl eframe::App for Model {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.label("Drag-and-drop files onto the window!");
@@ -39,45 +59,14 @@ impl eframe::App for MyApp {
                         ui.monospace(picked_path);
 
                         if ui.button("play").clicked() {
-                            let (_stream, stream_handle) = OutputStream::try_default().unwrap();
-                            let sink = Sink::try_new(&stream_handle).unwrap();
-                            let file = File::open(picked_path).unwrap();
-                            let source = Decoder::new(BufReader::new(file)).unwrap();
-                            sink.append(source);
+                            self.play_channel.send(picked_path.clone()).unwrap();
                         }
                     });
                 }
             });
-
-            // Show dropped files (if any):
-            if !self.dropped_files.is_empty() {
-                ui.group(|ui| {
-                    ui.label("Dropped files:");
-
-                    for file in &self.dropped_files {
-                        let mut info = if let Some(path) = &file.path {
-                            path.display().to_string()
-                        } else if !file.name.is_empty() {
-                            file.name.clone()
-                        } else {
-                            "???".to_owned()
-                        };
-                        if let Some(bytes) = &file.bytes {
-                            use std::fmt::Write as _;
-                            write!(info, " ({} bytes)", bytes.len()).ok();
-                        }
-                        ui.label(info);
-                    }
-                });
-            }
         });
 
         preview_files_being_dropped(ctx);
-
-        // Collect dropped files:
-        if !ctx.input().raw.dropped_files.is_empty() {
-            self.dropped_files = ctx.input().raw.dropped_files.clone();
-        }
     }
 }
 
