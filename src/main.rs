@@ -7,14 +7,14 @@ use eframe::epaint::{Color32, Stroke};
 use eframe::{egui, egui::Frame};
 use kira::manager::backend::cpal::CpalBackend;
 use kira::manager::{AudioManager, AudioManagerSettings};
-use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle, StaticSoundSettings, PlaybackState};
+use kira::sound::FromFileError;
+use kira::sound::static_sound::{StaticSoundData, StaticSoundSettings, PlaybackState};
+use kira::sound::streaming::{StreamingSoundData, StreamingSoundSettings, StreamingSoundHandle};
 use kira::tween::Tween;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::BufReader;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use tracing::{info, warn, Level, debug};
@@ -41,6 +41,9 @@ use colours::*;
 const PALETTE: [Color32; 12] = [
     ORANGE, YELLOW, PURPLE, PINK, BURGUNDY, SALMON, TEAL, BROWN, CREAM, RED, GREEN, BLUE,
 ];
+
+const BARS: usize = 128;
+const BAR_PLOT_WIDTH: f32 = 240.0;
 
 fn main() {
     let subscriber = FmtSubscriber::builder()
@@ -107,6 +110,7 @@ fn recover(
         if item.status == ItemStatus::Playing {
             item.status = ItemStatus::Loading;
             tx.send(ControlMessage::Play(item.id)).unwrap();
+            tx.send(ControlMessage::Seek(item.id, item.position)).unwrap();
         } else if item.status == ItemStatus::Loading {
             item.status = ItemStatus::Stopped;
         }
@@ -124,7 +128,7 @@ fn process_control_messages(rx: Receiver<ControlMessage>, model: Arc<RwLock<Mode
     }
 
     let mut manager = manager.unwrap();
-    let mut handles = HashMap::<u64, StaticSoundHandle>::new();
+    let mut handles = HashMap::<u64, StreamingSoundHandle<FromFileError>>::new();
 
     while let Ok(msg) = rx.recv() {
         let res = process_message(msg, &mut manager, &mut handles, &model);
@@ -137,7 +141,7 @@ fn process_control_messages(rx: Receiver<ControlMessage>, model: Arc<RwLock<Mode
 fn process_message(
     msg: ControlMessage,
     manager: &mut AudioManager,
-    handles: &mut HashMap<u64, StaticSoundHandle>,
+    handles: &mut HashMap<u64, StreamingSoundHandle<FromFileError>>,
     model: &Arc<RwLock<Model>>,
 ) -> Result<()> {
     // string return value because lol no lambda generics :(
@@ -156,7 +160,7 @@ fn process_message(
                     item.stems[item.current_stem].path.clone()
                 }).unwrap();
                 info!("loading {}", file);
-                let sound = match StaticSoundData::from_file(&file, StaticSoundSettings::new()) {
+                let sound = match StreamingSoundData::from_file(&file, StreamingSoundSettings::new()) {
                     Ok(sound) => sound,
                     Err(err) => {
                         edit_item(id, &mut |item| {
@@ -166,9 +170,10 @@ fn process_message(
                         return Err(err.into());
                     }
                 };
+                let static_sound = StaticSoundData::from_file(&file, StaticSoundSettings::new()).unwrap();
                 info!("passing {} to manager", file);
-                let frames = sound.frames.clone();
-                let duration = sound.frames.len() as f64 / sound.sample_rate as f64;
+                let duration = static_sound.frames.len() as f64 / static_sound.sample_rate as f64;
+                let frames = static_sound.frames;
                 let handle = manager.play(sound)?;
                 handles.insert(id, handle);
                 Some((duration, frames))
@@ -222,7 +227,7 @@ fn process_message(
 
 fn visualise_samples(item: &mut Item, frames: &[kira::dsp::Frame]) {
     // collect samples into bins
-    let mut bins = vec![0.0; 64];
+    let mut bins = vec![0.0; BARS];
     let mut max = 0.0f32;
     let bin_size = frames.len() / bins.len();
     debug!("processing {:#?} frames with bin size {}", frames.len(), bin_size);
@@ -293,6 +298,8 @@ struct SharedModel {
 impl eframe::App for SharedModel {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let mut model = self.model.write();
+        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.label("Drag-and-drop files onto the window!");
 
@@ -341,7 +348,7 @@ impl Model {
                 looped: false,
                 status: ItemStatus::Stopped,
                 colour: PALETTE[self.id_counter as usize % PALETTE.len()],
-                bars: vec![0.0; 64],
+                bars: vec![0.0; BARS],
                 position: 0.0,
                 duration: 0.0,
             };
@@ -387,11 +394,12 @@ fn item_widget(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &mut I
 
 fn render_bar_chart(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &mut Item) {
     let id = format!("frequency graph for {}", item.id);
-    let dimmed = item.colour.linear_multiply(0.2);
+    let dimmed = item.colour.linear_multiply(0.1);
 
+    let plot_x = ui.cursor().left();
     let resp = Plot::new(id)
         .height(30.0)
-        .width(240.0)
+        .width(BAR_PLOT_WIDTH)
         .show_axes([false, false])
         .show_background(false)
         .show_x(false)
@@ -399,13 +407,14 @@ fn render_bar_chart(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &
         .allow_drag(false)
         .allow_zoom(false)
         .allow_boxed_zoom(false)
+        .allow_scroll(false)
         .show(ui, |plot| {
             let mut data = vec![];
             for (i, height) in item.bars.iter().copied().enumerate() {
                 let height = height as f64;
                 for direction in [-1.0, 1.0] {
                     let mut bar = Bar::new(i as f64, direction * height);
-                    bar.bar_width = 0.3;
+                    bar.bar_width = 0.15;
                     bar.stroke = Stroke::none();
                     let progress = i as f64 / item.bars.len() as f64;
                     bar.fill = if progress < item.position / item.duration { item.colour } else { dimmed };
@@ -416,12 +425,23 @@ fn render_bar_chart(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &
             plot.bar_chart(chart);
         });
 
-    let drag_distance = resp.response.drag_delta().x as f64;
+    process_plot_events(channel, resp.response, plot_x, item);
+}
+
+fn process_plot_events(channel: &Sender<ControlMessage>, response: egui::Response, plot_x: f32, item: &mut Item) {
+    let drag_distance = response.drag_delta().x;
     if drag_distance != 0.0 {
-        let duration = item.duration;
-        let new_position = item.position + drag_distance * duration / 240.0;
-        item.position = new_position.clamp(0.0, duration);
-        channel.send(ControlMessage::Seek(item.id, item.position)).unwrap();
+        let duration = item.duration as f32;
+        let new_position = item.position as f32 + drag_distance * duration / BAR_PLOT_WIDTH;
+        let new_position = new_position.clamp(0.0, duration) as f64;
+        channel.send(ControlMessage::Seek(item.id, new_position)).unwrap();
+        return;
+    }
+    if let Some(pos) = response.interact_pointer_pos().filter(|_| response.clicked()) {
+        let duration = item.duration as f32;
+        let new_position = (pos.x - plot_x) * duration / BAR_PLOT_WIDTH;
+        let new_position = new_position.clamp(0.0, duration) as f64;
+        channel.send(ControlMessage::Seek(item.id, new_position)).unwrap();
     }
 }
 
