@@ -1,12 +1,12 @@
 mod colour_proxy;
 
 use colour_proxy::ExtendedColourOps;
-use eframe::egui::plot::{Plot, BarChart, Bar};
-use eframe::{egui, egui::Frame};
+use eframe::egui::plot::{Bar, BarChart, Plot};
 use eframe::epaint::{Color32, Stroke};
+use eframe::{egui, egui::Frame};
 use parking_lot::RwLock;
 use rodio::{Decoder, OutputStream, Sink, Source};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
@@ -14,19 +14,27 @@ use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 
-const RED      : Color32 = Color32::from_rgb(230, 70, 70);
-const GREEN    : Color32 = Color32::from_rgb(70, 175, 70);
-const BLUE     : Color32 = Color32::from_rgb(40, 120, 220);
-const ORANGE   : Color32 = Color32::from_rgb(240, 135, 35);
-const YELLOW   : Color32 = Color32::from_rgb(230, 200, 50);
-const PURPLE   : Color32 = Color32::from_rgb(110, 60, 200);
-const PINK     : Color32 = Color32::from_rgb(240, 140, 170);
-const BURGUNDY : Color32 = Color32::from_rgb(119, 51, 85);
-const SALMON   : Color32 = Color32::from_rgb(220, 130, 140);
-const TEAL     : Color32 = Color32::from_rgb(40, 150, 190);
-const BROWN    : Color32 = Color32::from_rgb(102, 51, 46);
-const CREAM    : Color32 = Color32::from_rgb(238, 221, 170);
-const PALETTE: [Color32; 12] = [RED, GREEN, BLUE, ORANGE, YELLOW, PURPLE, PINK, BURGUNDY, SALMON, TEAL, BROWN, CREAM];
+#[rustfmt::skip]
+mod colours {
+    use super::*;
+    pub const ORANGE   : Color32 = Color32::from_rgb(240, 135, 35);
+    pub const YELLOW   : Color32 = Color32::from_rgb(230, 200, 50);
+    pub const PURPLE   : Color32 = Color32::from_rgb(110, 60,  200);
+    pub const PINK     : Color32 = Color32::from_rgb(240, 140, 170);
+    pub const BURGUNDY : Color32 = Color32::from_rgb(119, 51,  85);
+    pub const SALMON   : Color32 = Color32::from_rgb(220, 130, 140);
+    pub const TEAL     : Color32 = Color32::from_rgb(40,  150, 190);
+    pub const BROWN    : Color32 = Color32::from_rgb(102, 51,  46);
+    pub const CREAM    : Color32 = Color32::from_rgb(238, 221, 170);
+    pub const RED      : Color32 = Color32::from_rgb(230, 70,  70);
+    pub const GREEN    : Color32 = Color32::from_rgb(70,  175, 70);
+    pub const BLUE     : Color32 = Color32::from_rgb(40,  120, 220);
+}
+
+use colours::*;
+const PALETTE: [Color32; 12] = [
+    ORANGE, YELLOW, PURPLE, PINK, BURGUNDY, SALMON, TEAL, BROWN, CREAM, RED, GREEN, BLUE,
+];
 
 fn main() {
     let options = eframe::NativeOptions {
@@ -58,7 +66,11 @@ fn main() {
 }
 
 /// Recover saved state of the application.
-fn recover(cc: &eframe::CreationContext, tx: Sender<ControlMessage>, model: Arc<RwLock<Model>>) -> Option<()> {
+fn recover(
+    cc: &eframe::CreationContext,
+    tx: Sender<ControlMessage>,
+    model: Arc<RwLock<Model>>,
+) -> Option<()> {
     let saved = cc.storage?.get_string("model")?;
     let loaded: Model = match serde_json::from_str(&saved) {
         Ok(loaded) => Some(loaded),
@@ -99,7 +111,7 @@ fn process_control_messages(rx: Receiver<ControlMessage>, model: Arc<RwLock<Mode
                     sinks.insert(id, sink);
                 }
             }
-            ControlMessage::Stop(id) => {
+            ControlMessage::Pause(id) => {
                 if let Some(sink) = sinks.get(&id) {
                     sink.pause();
                 }
@@ -112,12 +124,15 @@ fn process_control_messages(rx: Receiver<ControlMessage>, model: Arc<RwLock<Mode
 #[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Clone)]
 enum ControlMessage {
     Play(u64),
-    Stop(u64),
+    Pause(u64),
     ChangeStem(u64, usize),
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Clone, Serialize, Deserialize)]
-struct Stem { tag: String, path: String }
+struct Stem {
+    tag: String,
+    path: String,
+}
 
 #[derive(PartialEq, Debug, Clone, Serialize, Deserialize)]
 struct Item {
@@ -129,6 +144,10 @@ struct Item {
     looped: bool,
     playing: bool,
     colour: Color32,
+    // FIXME: remove these
+    bar_width: f64,
+    width_scale: f64,
+    bar_count: u16,
 }
 
 #[derive(PartialEq, Debug, Clone, Default, Serialize, Deserialize)]
@@ -184,12 +203,18 @@ impl Model {
             let i = Item {
                 id: self.id_counter,
                 name,
-                stems: vec![Stem { tag: "default".to_string(), path }],
+                stems: vec![Stem {
+                    tag: "default".to_string(),
+                    path,
+                }],
                 current_stem: 0,
                 volume: 1.0,
                 looped: false,
                 playing: false,
                 colour: PALETTE[self.id_counter as usize % PALETTE.len()],
+                bar_width: 0.02,
+                width_scale: 1.0,
+                bar_count: 40,
             };
             self.id_counter += 1;
             i
@@ -221,35 +246,47 @@ fn item_widget(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &mut I
                         .send(if item.playing {
                             ControlMessage::Play(item.id)
                         } else {
-                            ControlMessage::Stop(item.id)
+                            ControlMessage::Pause(item.id)
                         })
                         .unwrap();
                 }
             });
-            let id = format!("frequency graph for {}", item.id);
-            Plot::new(id)
-            .height(30.0)
-            .width(80.0)
-            .show_axes([false, false])
-            .show_background(false)
-            .show_x(false)
-            .show_y(false)
-            .allow_drag(false)
-            .allow_zoom(false)
-            .allow_boxed_zoom(false)
-            .show(ui, |plot| {
-                let mut data = vec![];
-                for i in 0..5 {
-                    let mut bar = Bar::new(i as f64, ((i - 1) * 5) as f64);
+            render_bar_chart(ui, item);
+        });
+    });
+}
+
+fn render_bar_chart(ui: &mut egui::Ui, item: &mut Item) {
+    let id = format!("frequency graph for {}", item.id);
+    ui.add(egui::Slider::new(&mut item.bar_width, 0.0..=2.0).text("bar width"));
+    ui.add(egui::Slider::new(&mut item.width_scale, 0.01..=3.0).text("width scale"));
+    ui.add(egui::Slider::new(&mut item.bar_count, 1..=100).text("bar count"));
+
+    Plot::new(id)
+        .height(30.0)
+        .width(120.0)
+        .show_axes([false, false])
+        .show_background(false)
+        .show_x(false)
+        .show_y(false)
+        .allow_drag(false)
+        .allow_zoom(false)
+        .allow_boxed_zoom(false)
+        .show(ui, |plot| {
+            let mut data = vec![];
+            for i in 0..item.bar_count {
+                for direction in [-1.0, 1.0] {
+                    let height = (i as f64 / item.width_scale).sin() * 10.0 + 3.0;
+                    let mut bar = Bar::new(i as f64 / item.width_scale, direction * height);
+                    bar.bar_width = item.bar_width;
                     bar.stroke = Stroke::none();
                     bar.fill = item.colour;
                     data.push(bar);
                 }
-                let chart = BarChart::new(data);
-                plot.bar_chart(chart);
-            });
+            }
+            let chart = BarChart::new(data);
+            plot.bar_chart(chart);
         });
-    });
 }
 
 /// Preview hovering files:

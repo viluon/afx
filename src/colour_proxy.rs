@@ -12,7 +12,9 @@ impl ColourProxy {
     pub fn via_rgba<F: FnMut(rgb::RGBA<u8>) -> rgb::RGBA<u8>>(&self, mut f: F) -> Self {
         let rgba = self.into();
         let rgba = f(rgba);
-        Self(Color32::from_rgba_premultiplied(rgba.r, rgba.g, rgba.b, rgba.a))
+        Self(Color32::from_rgba_premultiplied(
+            rgba.r, rgba.g, rgba.b, rgba.a,
+        ))
     }
 }
 
@@ -68,7 +70,9 @@ impl From<rgb::RGB<u8>> for ColourProxy {
 
 impl From<&rgb::RGBA<u8>> for ColourProxy {
     fn from(rgba: &rgb::RGBA<u8>) -> Self {
-        Self(Color32::from_rgba_premultiplied(rgba.r, rgba.g, rgba.b, rgba.a))
+        Self(Color32::from_rgba_premultiplied(
+            rgba.r, rgba.g, rgba.b, rgba.a,
+        ))
     }
 }
 
@@ -81,7 +85,9 @@ impl From<ColourProxy> for rgb::RGBA<u8> {
 
 impl From<rgb::RGBA<u8>> for ColourProxy {
     fn from(rgba: rgb::RGBA<u8>) -> Self {
-        Self(Color32::from_rgba_premultiplied(rgba.r, rgba.g, rgba.b, rgba.a))
+        Self(Color32::from_rgba_premultiplied(
+            rgba.r, rgba.g, rgba.b, rgba.a,
+        ))
     }
 }
 
