@@ -1,18 +1,24 @@
 mod colour_proxy;
 
+use anyhow::Result;
 use colour_proxy::ExtendedColourOps;
 use eframe::egui::plot::{Bar, BarChart, Plot};
 use eframe::epaint::{Color32, Stroke};
 use eframe::{egui, egui::Frame};
+use kira::manager::backend::cpal::CpalBackend;
+use kira::manager::{AudioManager, AudioManagerSettings};
+use kira::sound::static_sound::{StaticSoundHandle, StaticSoundData, StaticSoundSettings};
+use kira::tween::Tween;
 use parking_lot::RwLock;
-use rodio::{Decoder, OutputStream, Sink, Source};
 use serde::{Deserialize, Serialize};
+use tracing_subscriber::FmtSubscriber;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
+use tracing::{info, warn, Level};
 
 #[rustfmt::skip]
 mod colours {
@@ -37,6 +43,13 @@ const PALETTE: [Color32; 12] = [
 ];
 
 fn main() {
+    let subscriber = FmtSubscriber::builder()
+        .with_max_level(Level::TRACE)
+        .finish();
+
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("setting default subscriber failed");
+
     let options = eframe::NativeOptions {
         drag_and_drop_support: true,
         ..Default::default()
@@ -92,32 +105,54 @@ fn recover(
 }
 
 fn process_control_messages(rx: Receiver<ControlMessage>, model: Arc<RwLock<Model>>) {
-    let (_stream, stream_handle) = OutputStream::try_default().unwrap();
-    let mut sinks = HashMap::<u64, Sink>::new();
+    let manager = AudioManager::<CpalBackend>::new(AudioManagerSettings::default());
+    if let Err(err) = manager {
+        warn!("Failed to create audio manager: {}", err);
+        return;
+    }
+
+    let mut manager = manager.unwrap();
+    let mut handles = HashMap::<u64, StaticSoundHandle>::new();
 
     while let Ok(msg) = rx.recv() {
-        match msg {
-            ControlMessage::Play(id) => {
-                if let Some(sink) = sinks.get(&id) {
-                    sink.play();
-                } else {
-                    let model = model.read();
-                    let sink = Sink::try_new(&stream_handle).unwrap();
-                    let item = model.items.iter().find(|item| item.id == id).unwrap();
-                    let file = &item.stems[item.current_stem].path;
-                    let file = File::open(file).unwrap();
-                    let source = Decoder::new(BufReader::new(file)).unwrap();
-                    sink.append(source.repeat_infinite());
-                    sinks.insert(id, sink);
-                }
-            }
-            ControlMessage::Pause(id) => {
-                if let Some(sink) = sinks.get(&id) {
-                    sink.pause();
-                }
-            }
-            ControlMessage::ChangeStem(_, _) => todo!(),
+        let res = process_message(msg, &mut manager, &mut handles, &model);
+        if let Err(err) = res {
+            warn!("Failed to process control message: {}", err);
         }
+    }
+}
+
+fn process_message(msg: ControlMessage, manager: &mut AudioManager, handles: &mut HashMap<u64, StaticSoundHandle>, model: &Arc<RwLock<Model>>) -> Result<()> {
+    let edit_item = |id: u64, f: fn(&mut Item) -> i32| -> i32 {
+        let mut model = model.write();
+        let item = model.items.iter_mut().find(|item| item.id == id).unwrap();
+        f(item)
+    };
+    match msg {
+        ControlMessage::Play(id) => {
+            if let Some(handle) = handles.get_mut(&id) {
+                handle.resume(Tween::default())?;
+            } else {
+                let file = {
+                    let model = model.read();
+                    let item = model.items.iter().find(|item| item.id == id).unwrap();
+                    item.stems[item.current_stem].path.clone()
+                };
+                info!("loading {}", file);
+                let sound = StaticSoundData::from_file(&file, StaticSoundSettings::new())?;
+                info!("passing {} to manager", file);
+                let handle = manager.play(sound)?;
+                handles.insert(id, handle);
+            }
+            Ok(())
+        }
+        ControlMessage::Pause(id) => {
+            if let Some(handle) = handles.get_mut(&id) {
+                handle.pause(Tween::default())?;
+            }
+            Ok(())
+        }
+        ControlMessage::ChangeStem(_, _) => todo!(),
     }
 }
 
@@ -239,7 +274,7 @@ fn item_widget(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &mut I
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
                 ui.label(&item.name);
-                let verb = if item.playing { "stop" } else { "play" };
+                let verb = if item.playing { "pause" } else { "play" };
                 if ui.button(verb).clicked() {
                     item.playing = !item.playing;
                     channel

@@ -6,13 +6,21 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+anyhow = "1.0"
 eframe = { version = "0.19.0", features = ["persistence"] }
+kira = "0.7.1"
 parking_lot = "0.12"
 rfd = "0.10.0"
 rgb = "0.8.34"
-rodio = { version = "0.16.0", features = ["symphonia-all"], default-features = false }
 serde = "1.0"
 serde_json = "1.0"
+tracing = "0.1.37"
+tracing-subscriber = "0.3.16"
 
 [profile.release]
 lto = true
+
+# workaround for slow MP3 load times in debug mode
+# see https://github.com/tesselode/kira/issues/24
+[profile.dev.package.symphonia-bundle-mp3]
+# opt-level = 3
