@@ -31,7 +31,10 @@ dependencies = [
  "eframe",
  "parking_lot",
  "rfd",
+ "rgb",
  "rodio",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1662,6 +1665,15 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "windows",
+]
+
+[[package]]
+name = "rgb"
+version = "0.8.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3603b7d71ca82644f79b5a06d1220e9a58ede60bd32255f698cb1af8838b8db3"
+dependencies = [
+ "bytemuck",
 ]
 
 [[package]]

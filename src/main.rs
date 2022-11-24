@@ -1,10 +1,32 @@
-use eframe::egui;
+mod colour_proxy;
+
+use colour_proxy::ExtendedColourOps;
+use eframe::egui::plot::{Plot, BarChart, Bar};
+use eframe::{egui, egui::Frame};
+use eframe::epaint::{Color32, Stroke};
 use parking_lot::RwLock;
 use rodio::{Decoder, OutputStream, Sink, Source};
+use serde::{Serialize, Deserialize};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
+
+const RED      : Color32 = Color32::from_rgb(230, 70, 70);
+const GREEN    : Color32 = Color32::from_rgb(70, 175, 70);
+const BLUE     : Color32 = Color32::from_rgb(40, 120, 220);
+const ORANGE   : Color32 = Color32::from_rgb(240, 135, 35);
+const YELLOW   : Color32 = Color32::from_rgb(230, 200, 50);
+const PURPLE   : Color32 = Color32::from_rgb(110, 60, 200);
+const PINK     : Color32 = Color32::from_rgb(240, 140, 170);
+const BURGUNDY : Color32 = Color32::from_rgb(119, 51, 85);
+const SALMON   : Color32 = Color32::from_rgb(220, 130, 140);
+const TEAL     : Color32 = Color32::from_rgb(40, 150, 190);
+const BROWN    : Color32 = Color32::from_rgb(102, 51, 46);
+const CREAM    : Color32 = Color32::from_rgb(238, 221, 170);
+const PALETTE: [Color32; 12] = [RED, GREEN, BLUE, ORANGE, YELLOW, PURPLE, PINK, BURGUNDY, SALMON, TEAL, BROWN, CREAM];
 
 fn main() {
     let options = eframe::NativeOptions {
@@ -12,19 +34,21 @@ fn main() {
         ..Default::default()
     };
 
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = channel();
     let model = Arc::new(RwLock::new(Model::default()));
 
     {
         let model = model.clone();
         // start a background thread for audio playback
-        std::thread::spawn(move || playback(rx, model));
+        std::thread::spawn(move || process_control_messages(rx, model));
     }
 
     eframe::run_native(
         "afx",
         options,
-        Box::new(|_cc| {
+        Box::new(|cc| {
+            recover(cc, tx.clone(), model.clone());
+
             Box::new(SharedModel {
                 play_channel: tx,
                 model,
@@ -33,22 +57,54 @@ fn main() {
     );
 }
 
-fn playback(rx: std::sync::mpsc::Receiver<ControlMessage>, model: Arc<RwLock<Model>>) {
+/// Recover saved state of the application.
+fn recover(cc: &eframe::CreationContext, tx: Sender<ControlMessage>, model: Arc<RwLock<Model>>) -> Option<()> {
+    let saved = cc.storage?.get_string("model")?;
+    let loaded: Model = match serde_json::from_str(&saved) {
+        Ok(loaded) => Some(loaded),
+        Err(err) => {
+            eprintln!("Failed to load saved model: {}", err);
+            None
+        }
+    }?;
+
+    let mut model = model.write();
+    for item in loaded.items.iter() {
+        if item.playing {
+            tx.send(ControlMessage::Play(item.id)).unwrap();
+        }
+    }
+
+    *model = loaded;
+    Some(())
+}
+
+fn process_control_messages(rx: Receiver<ControlMessage>, model: Arc<RwLock<Model>>) {
     let (_stream, stream_handle) = OutputStream::try_default().unwrap();
+    let mut sinks = HashMap::<u64, Sink>::new();
+
     while let Ok(msg) = rx.recv() {
         match msg {
             ControlMessage::Play(id) => {
-                let model = model.read();
-                let sink = Sink::try_new(&stream_handle).unwrap();
-                let item = model.items.iter().find(|item| item.id == id).unwrap();
-                let file = &item.stems[item.current_stem].1;
-                let file = File::open(file).unwrap();
-                let source = Decoder::new(BufReader::new(file)).unwrap();
-                sink.append(source.repeat_infinite());
-                sink.detach();
+                if let Some(sink) = sinks.get(&id) {
+                    sink.play();
+                } else {
+                    let model = model.read();
+                    let sink = Sink::try_new(&stream_handle).unwrap();
+                    let item = model.items.iter().find(|item| item.id == id).unwrap();
+                    let file = &item.stems[item.current_stem].path;
+                    let file = File::open(file).unwrap();
+                    let source = Decoder::new(BufReader::new(file)).unwrap();
+                    sink.append(source.repeat_infinite());
+                    sinks.insert(id, sink);
+                }
             }
-            ControlMessage::Stop(_) => todo!(),
-            ControlMessage::ChangeStem(_) => todo!(),
+            ControlMessage::Stop(id) => {
+                if let Some(sink) = sinks.get(&id) {
+                    sink.pause();
+                }
+            }
+            ControlMessage::ChangeStem(_, _) => todo!(),
         }
     }
 }
@@ -57,13 +113,13 @@ fn playback(rx: std::sync::mpsc::Receiver<ControlMessage>, model: Arc<RwLock<Mod
 enum ControlMessage {
     Play(u64),
     Stop(u64),
-    ChangeStem(usize),
+    ChangeStem(u64, usize),
 }
 
-#[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Clone)]
-struct Stem(String, String);
+#[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Clone, Serialize, Deserialize)]
+struct Stem { tag: String, path: String }
 
-#[derive(PartialEq, PartialOrd, Debug, Clone)]
+#[derive(PartialEq, Debug, Clone, Serialize, Deserialize)]
 struct Item {
     id: u64,
     name: String,
@@ -72,16 +128,17 @@ struct Item {
     volume: f64,
     looped: bool,
     playing: bool,
+    colour: Color32,
 }
 
-#[derive(PartialEq, PartialOrd, Debug, Clone, Default)]
+#[derive(PartialEq, Debug, Clone, Default, Serialize, Deserialize)]
 struct Model {
     items: Vec<Item>,
     id_counter: u64,
 }
 
 struct SharedModel {
-    play_channel: std::sync::mpsc::Sender<ControlMessage>,
+    play_channel: Sender<ControlMessage>,
     model: Arc<RwLock<Model>>,
 }
 
@@ -92,37 +149,47 @@ impl eframe::App for SharedModel {
             ui.label("Drag-and-drop files onto the window!");
 
             ui.vertical(|ui| {
-                if ui.button("Open file…").clicked() {
+                if ui.button("Import").clicked() {
                     if let Some(paths) = rfd::FileDialog::new().pick_files() {
                         model.import_paths(paths);
                     }
                 }
 
-                ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
-                    let channel = &self.play_channel;
-                    for item in model.items.iter_mut() {
-                        item_widget(channel, ui, item);
-                    }
-                });
+                ui.with_layout(
+                    egui::Layout::left_to_right(egui::Align::LEFT).with_main_wrap(true),
+                    |ui| {
+                        let channel = &self.play_channel;
+                        for item in model.items.iter_mut() {
+                            ui.scope(|ui| item_widget(channel, ui, item));
+                        }
+                    },
+                );
             });
         });
 
         preview_files_being_dropped(ctx);
+    }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        let model = self.model.read();
+        storage.set_string("model", serde_json::to_string(&*model).unwrap());
     }
 }
 
 impl Model {
     fn import_paths(&mut self, paths: Vec<PathBuf>) {
         self.items.extend(paths.into_iter().map(|path| {
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
             let path = path.display().to_string();
             let i = Item {
                 id: self.id_counter,
-                name: path.clone(),
-                stems: vec![Stem("default".to_string(), path)],
+                name,
+                stems: vec![Stem { tag: "default".to_string(), path }],
                 current_stem: 0,
                 volume: 1.0,
                 looped: false,
                 playing: false,
+                colour: PALETTE[self.id_counter as usize % PALETTE.len()],
             };
             self.id_counter += 1;
             i
@@ -130,24 +197,58 @@ impl Model {
     }
 }
 
-fn item_widget(
-    channel: &std::sync::mpsc::Sender<ControlMessage>,
-    ui: &mut egui::Ui,
-    item: &mut Item,
-) {
-    ui.horizontal(|ui| {
-        ui.label(&item.name);
-        let verb = if item.playing { "pause" } else { "play" };
-        if ui.button(verb).clicked() {
-            item.playing = !item.playing;
-            channel
-                .send(if item.playing {
-                    ControlMessage::Play(item.id)
-                } else {
-                    ControlMessage::Stop(item.id)
-                })
-                .unwrap();
-        }
+fn item_widget(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &mut Item) {
+    use rgb::*;
+    let text_colour = item.colour.via_rgb(|c| c.map(|x| 255 - x));
+
+    let style = ui.style_mut();
+    let widget_style = &mut style.visuals.widgets;
+
+    widget_style.inactive.bg_fill = item.colour;
+    widget_style.inactive.fg_stroke.color = text_colour;
+    widget_style.noninteractive.bg_fill = item.colour;
+    widget_style.hovered.bg_fill = Color32::GOLD;
+    widget_style.active.bg_fill = Color32::GOLD;
+
+    Frame::group(ui.style()).show(ui, |ui| {
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                ui.label(&item.name);
+                let verb = if item.playing { "stop" } else { "play" };
+                if ui.button(verb).clicked() {
+                    item.playing = !item.playing;
+                    channel
+                        .send(if item.playing {
+                            ControlMessage::Play(item.id)
+                        } else {
+                            ControlMessage::Stop(item.id)
+                        })
+                        .unwrap();
+                }
+            });
+            let id = format!("frequency graph for {}", item.id);
+            Plot::new(id)
+            .height(30.0)
+            .width(80.0)
+            .show_axes([false, false])
+            .show_background(false)
+            .show_x(false)
+            .show_y(false)
+            .allow_drag(false)
+            .allow_zoom(false)
+            .allow_boxed_zoom(false)
+            .show(ui, |plot| {
+                let mut data = vec![];
+                for i in 0..5 {
+                    let mut bar = Bar::new(i as f64, ((i - 1) * 5) as f64);
+                    bar.stroke = Stroke::none();
+                    bar.fill = item.colour;
+                    data.push(bar);
+                }
+                let chart = BarChart::new(data);
+                plot.bar_chart(chart);
+            });
+        });
     });
 }
 

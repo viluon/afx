@@ -9,7 +9,10 @@ edition = "2021"
 eframe = { version = "0.19.0", features = ["persistence"] }
 parking_lot = "0.12"
 rfd = "0.10.0"
+rgb = "0.8.34"
 rodio = { version = "0.16.0", features = ["symphonia-all"], default-features = false }
+serde = "1.0"
+serde_json = "1.0"
 
 [profile.release]
 lto = true
