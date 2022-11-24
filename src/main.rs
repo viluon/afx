@@ -7,18 +7,18 @@ use eframe::epaint::{Color32, Stroke};
 use eframe::{egui, egui::Frame};
 use kira::manager::backend::cpal::CpalBackend;
 use kira::manager::{AudioManager, AudioManagerSettings};
-use kira::sound::static_sound::{StaticSoundHandle, StaticSoundData, StaticSoundSettings};
+use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle, StaticSoundSettings, PlaybackState};
 use kira::tween::Tween;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use tracing_subscriber::FmtSubscriber;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
-use tracing::{info, warn, Level};
+use tracing::{info, warn, Level, debug};
+use tracing_subscriber::FmtSubscriber;
 
 #[rustfmt::skip]
 mod colours {
@@ -47,8 +47,7 @@ fn main() {
         .with_max_level(Level::TRACE)
         .finish();
 
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("setting default subscriber failed");
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
     let options = eframe::NativeOptions {
         drag_and_drop_support: true,
@@ -62,6 +61,14 @@ fn main() {
         let model = model.clone();
         // start a background thread for audio playback
         std::thread::spawn(move || process_control_messages(rx, model));
+        // sync playback status every 100 ms
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                tx.send(ControlMessage::SyncPlaybackStatus).unwrap();
+            }
+        });
     }
 
     eframe::run_native(
@@ -85,7 +92,7 @@ fn recover(
     model: Arc<RwLock<Model>>,
 ) -> Option<()> {
     let saved = cc.storage?.get_string("model")?;
-    let loaded: Model = match serde_json::from_str(&saved) {
+    let mut loaded: Model = match serde_json::from_str(&saved) {
         Ok(loaded) => Some(loaded),
         Err(err) => {
             eprintln!("Failed to load saved model: {}", err);
@@ -93,10 +100,15 @@ fn recover(
         }
     }?;
 
+    // taking the lock before any messages are sent so that the background
+    // thread can't accidentally query the model before it's been loaded
     let mut model = model.write();
-    for item in loaded.items.iter() {
-        if item.playing {
+    for item in loaded.items.iter_mut() {
+        if item.status == ItemStatus::Playing {
+            item.status = ItemStatus::Loading;
             tx.send(ControlMessage::Play(item.id)).unwrap();
+        } else if item.status == ItemStatus::Loading {
+            item.status = ItemStatus::Stopped;
         }
     }
 
@@ -122,28 +134,55 @@ fn process_control_messages(rx: Receiver<ControlMessage>, model: Arc<RwLock<Mode
     }
 }
 
-fn process_message(msg: ControlMessage, manager: &mut AudioManager, handles: &mut HashMap<u64, StaticSoundHandle>, model: &Arc<RwLock<Model>>) -> Result<()> {
-    let edit_item = |id: u64, f: fn(&mut Item) -> i32| -> i32 {
+fn process_message(
+    msg: ControlMessage,
+    manager: &mut AudioManager,
+    handles: &mut HashMap<u64, StaticSoundHandle>,
+    model: &Arc<RwLock<Model>>,
+) -> Result<()> {
+    // string return value because lol no lambda generics :(
+    let edit_item = |id: u64, f: &mut dyn FnMut(&mut Item) -> String| {
         let mut model = model.write();
-        let item = model.items.iter_mut().find(|item| item.id == id).unwrap();
-        f(item)
+        model.items.iter_mut().find(|item| item.id == id).map(f)
     };
+
     match msg {
         ControlMessage::Play(id) => {
-            if let Some(handle) = handles.get_mut(&id) {
+            let res = if let Some(handle) = handles.get_mut(&id) {
                 handle.resume(Tween::default())?;
+                None
             } else {
-                let file = {
-                    let model = model.read();
-                    let item = model.items.iter().find(|item| item.id == id).unwrap();
+                let file = edit_item(id, &mut |item| {
                     item.stems[item.current_stem].path.clone()
-                };
+                }).unwrap();
                 info!("loading {}", file);
-                let sound = StaticSoundData::from_file(&file, StaticSoundSettings::new())?;
+                let sound = match StaticSoundData::from_file(&file, StaticSoundSettings::new()) {
+                    Ok(sound) => sound,
+                    Err(err) => {
+                        edit_item(id, &mut |item| {
+                            item.status = ItemStatus::Stopped;
+                            String::new()
+                        });
+                        return Err(err.into());
+                    }
+                };
                 info!("passing {} to manager", file);
+                let frames = sound.frames.clone();
+                let duration = sound.frames.len() as f64 / sound.sample_rate as f64;
                 let handle = manager.play(sound)?;
                 handles.insert(id, handle);
-            }
+                Some((duration, frames))
+            };
+            // we ignore the option here - the edit may not go through
+            // if the item was deleted in the meantime
+            edit_item(id, &mut |item| {
+                item.status = ItemStatus::Playing;
+                if let Some((duration, frames)) = &res {
+                    visualise_samples(item, frames);
+                    item.duration = *duration;
+                }
+                String::new()
+            });
             Ok(())
         }
         ControlMessage::Pause(id) => {
@@ -153,20 +192,76 @@ fn process_message(msg: ControlMessage, manager: &mut AudioManager, handles: &mu
             Ok(())
         }
         ControlMessage::ChangeStem(_, _) => todo!(),
+        ControlMessage::SyncPlaybackStatus => {
+            let mut to_remove = vec![];
+            for (&id, handle) in handles.iter_mut() {
+                edit_item(id, &mut |item| {
+                    item.position = handle.position();
+                    if item.position >= item.duration || handle.state() == PlaybackState::Stopped {
+                        item.status = ItemStatus::Stopped;
+                        item.position = 0.0;
+                        handle.stop(Tween::default()).unwrap();
+                        to_remove.push(id);
+                    }
+                    String::new()
+                });
+            }
+            for id in to_remove {
+                handles.remove(&id);
+            }
+            Ok(())
+        }
+        ControlMessage::Seek(id, target) => {
+            if let Some(handle) = handles.get_mut(&id) {
+                handle.seek_to(target)?;
+            }
+            Ok(())
+        }
     }
 }
 
-#[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Clone)]
+fn visualise_samples(item: &mut Item, frames: &[kira::dsp::Frame]) {
+    // collect samples into bins
+    let mut bins = vec![0.0; 64];
+    let mut max = 0.0f32;
+    let bin_size = frames.len() / bins.len();
+    debug!("processing {:#?} frames with bin size {}", frames.len(), bin_size);
+
+    for (i, bin) in bins.iter_mut().enumerate() {
+        let start = i * bin_size;
+        let end = start + bin_size;
+        let mut sum = 0.0;
+        for sample in frames[start..end].iter() {
+            sum += sample.left.abs() * 0.5 + sample.right.abs() * 0.5;
+        }
+        *bin = sum / bin_size as f32;
+        max = max.max(*bin);
+    }
+
+    item.bars = bins.into_iter().map(|bin| bin / max).collect();
+}
+
+#[derive(PartialEq, PartialOrd, Debug, Clone)]
 enum ControlMessage {
     Play(u64),
     Pause(u64),
     ChangeStem(u64, usize),
+    SyncPlaybackStatus,
+    Seek(u64, f64),
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Clone, Serialize, Deserialize)]
 struct Stem {
     tag: String,
     path: String,
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Clone, Serialize, Deserialize)]
+enum ItemStatus {
+    Stopped,
+    Loading,
+    Playing,
+    Paused,
 }
 
 #[derive(PartialEq, Debug, Clone, Serialize, Deserialize)]
@@ -177,12 +272,11 @@ struct Item {
     current_stem: usize,
     volume: f64,
     looped: bool,
-    playing: bool,
+    status: ItemStatus,
     colour: Color32,
-    // FIXME: remove these
-    bar_width: f64,
-    width_scale: f64,
-    bar_count: u16,
+    bars: Vec<f32>,
+    position: f64,
+    duration: f64,
 }
 
 #[derive(PartialEq, Debug, Clone, Default, Serialize, Deserialize)]
@@ -245,11 +339,11 @@ impl Model {
                 current_stem: 0,
                 volume: 1.0,
                 looped: false,
-                playing: false,
+                status: ItemStatus::Stopped,
                 colour: PALETTE[self.id_counter as usize % PALETTE.len()],
-                bar_width: 0.02,
-                width_scale: 1.0,
-                bar_count: 40,
+                bars: vec![0.0; 64],
+                position: 0.0,
+                duration: 0.0,
             };
             self.id_counter += 1;
             i
@@ -267,39 +361,37 @@ fn item_widget(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &mut I
     widget_style.inactive.bg_fill = item.colour;
     widget_style.inactive.fg_stroke.color = text_colour;
     widget_style.noninteractive.bg_fill = item.colour;
-    widget_style.hovered.bg_fill = Color32::GOLD;
-    widget_style.active.bg_fill = Color32::GOLD;
 
     Frame::group(ui.style()).show(ui, |ui| {
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
                 ui.label(&item.name);
-                let verb = if item.playing { "pause" } else { "play" };
-                if ui.button(verb).clicked() {
-                    item.playing = !item.playing;
-                    channel
-                        .send(if item.playing {
-                            ControlMessage::Play(item.id)
-                        } else {
-                            ControlMessage::Pause(item.id)
-                        })
-                        .unwrap();
-                }
+                match item.status {
+                    ItemStatus::Stopped | ItemStatus::Paused => if ui.button("play").clicked() {
+                        item.status = ItemStatus::Loading;
+                        channel.send(ControlMessage::Play(item.id)).unwrap();
+                    },
+                    ItemStatus::Loading => {
+                        ui.spinner();
+                    },
+                    ItemStatus::Playing => if ui.button("pause").clicked() {
+                        item.status = ItemStatus::Paused;
+                        channel.send(ControlMessage::Pause(item.id)).unwrap();
+                    },
+                };
             });
-            render_bar_chart(ui, item);
+            render_bar_chart(channel, ui, item);
         });
     });
 }
 
-fn render_bar_chart(ui: &mut egui::Ui, item: &mut Item) {
+fn render_bar_chart(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &mut Item) {
     let id = format!("frequency graph for {}", item.id);
-    ui.add(egui::Slider::new(&mut item.bar_width, 0.0..=2.0).text("bar width"));
-    ui.add(egui::Slider::new(&mut item.width_scale, 0.01..=3.0).text("width scale"));
-    ui.add(egui::Slider::new(&mut item.bar_count, 1..=100).text("bar count"));
+    let dimmed = item.colour.linear_multiply(0.2);
 
-    Plot::new(id)
+    let resp = Plot::new(id)
         .height(30.0)
-        .width(120.0)
+        .width(240.0)
         .show_axes([false, false])
         .show_background(false)
         .show_x(false)
@@ -309,19 +401,28 @@ fn render_bar_chart(ui: &mut egui::Ui, item: &mut Item) {
         .allow_boxed_zoom(false)
         .show(ui, |plot| {
             let mut data = vec![];
-            for i in 0..item.bar_count {
+            for (i, height) in item.bars.iter().copied().enumerate() {
+                let height = height as f64;
                 for direction in [-1.0, 1.0] {
-                    let height = (i as f64 / item.width_scale).sin() * 10.0 + 3.0;
-                    let mut bar = Bar::new(i as f64 / item.width_scale, direction * height);
-                    bar.bar_width = item.bar_width;
+                    let mut bar = Bar::new(i as f64, direction * height);
+                    bar.bar_width = 0.3;
                     bar.stroke = Stroke::none();
-                    bar.fill = item.colour;
+                    let progress = i as f64 / item.bars.len() as f64;
+                    bar.fill = if progress < item.position / item.duration { item.colour } else { dimmed };
                     data.push(bar);
                 }
             }
             let chart = BarChart::new(data);
             plot.bar_chart(chart);
         });
+
+    let drag_distance = resp.response.drag_delta().x as f64;
+    if drag_distance != 0.0 {
+        let duration = item.duration;
+        let new_position = item.position + drag_distance * duration / 240.0;
+        item.position = new_position.clamp(0.0, duration);
+        channel.send(ControlMessage::Seek(item.id, item.position)).unwrap();
+    }
 }
 
 /// Preview hovering files:
