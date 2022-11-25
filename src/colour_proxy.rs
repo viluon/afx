@@ -20,7 +20,7 @@ impl ColourProxy {
 
 impl From<&Color32> for ColourProxy {
     fn from(colour: &Color32) -> Self {
-        Self(colour.clone())
+        Self(*colour)
     }
 }
 
@@ -103,6 +103,7 @@ pub trait ExtendedColourOps {
     fn via_rgba<F: FnMut(rgb::RGBA<u8>) -> rgb::RGBA<u8>>(&self, f: F) -> Self;
     fn map_rgb<F: FnMut(u8) -> u8>(&self, f: F) -> Self;
     fn map_rgba<F: FnMut(u8) -> u8>(&self, f: F) -> Self;
+    fn mix(&self, ratio: f32, other: &Self) -> Self;
 }
 
 impl ExtendedColourOps for Color32 {
@@ -126,5 +127,13 @@ impl ExtendedColourOps for Color32 {
     fn map_rgba<F: FnMut(u8) -> u8>(&self, mut f: F) -> Self {
         use rgb::*;
         self.via_rgba(|rgba| rgba.map(&mut f))
+    }
+
+    fn mix(&self, ratio: f32, other: &Self) -> Self {
+        Color32::from_rgb(
+            ((1.0 - ratio) * self.r() as f32 + ratio * other.r() as f32) as u8,
+            ((1.0 - ratio) * self.g() as f32 + ratio * other.g() as f32) as u8,
+            ((1.0 - ratio) * self.b() as f32 + ratio * other.b() as f32) as u8,
+        )
     }
 }

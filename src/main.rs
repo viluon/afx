@@ -1,8 +1,9 @@
 mod colour_proxy;
 
 use anyhow::Result;
+use colour_proxy::ExtendedColourOps;
 use eframe::egui::plot::{Bar, BarChart, Plot};
-use eframe::egui::{Button, Resize, RichText, Slider};
+use eframe::egui::{Button, RichText, Slider};
 use eframe::epaint::{vec2, Color32, Stroke};
 use eframe::{egui, egui::Frame};
 use kira::manager::backend::cpal::CpalBackend;
@@ -12,7 +13,7 @@ use kira::sound::streaming::{StreamingSoundData, StreamingSoundHandle, Streaming
 use kira::sound::FromFileError;
 use kira::tween::Tween;
 use kira::LoopBehavior;
-use parking_lot::RwLock;
+use parking_lot::{RwLock, RwLockWriteGuard};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -185,9 +186,11 @@ fn process_message(
             let mut to_remove = vec![];
             for (&id, handle) in handles.iter_mut() {
                 edit_item(id, &mut |item| {
-                    item.position = handle.position();
+                    item.target_position = handle.position();
+
                     if item.position >= item.duration || handle.state() == PlaybackState::Stopped {
-                        item.position = 0.0;
+                        item.target_position = 0.0;
+
                         to_remove.push(id);
                         if item.looped {
                             // FIXME this is a hack, since looping behaviour
@@ -212,7 +215,8 @@ fn process_message(
                 handle.seek_to(target)?;
             } else {
                 edit_item(id, &mut |item| {
-                    item.position = target;
+                    item.target_position = target;
+
                     String::new()
                 });
             }
@@ -346,6 +350,7 @@ struct Item {
     /// This is effectively owned by the playback thread.
     /// Changes from elsewhere will be overwritten.
     position: f64,
+    target_position: f64,
     duration: f64,
 }
 
@@ -373,7 +378,7 @@ impl eframe::App for SharedModel {
                 |ui| {
                     ui.label("filter:");
                     ui.text_edit_singleline(&mut model.search_query);
-                }
+                },
             );
 
             let desired_size = ui.ctx().input().screen_rect.size();
@@ -384,22 +389,7 @@ impl eframe::App for SharedModel {
                     |ui| {
                         ui.set_max_size(desired_size);
                         let channel = &self.play_channel;
-                        let lowercase_query = model.search_query.to_lowercase();
-                        let pat: Vec<_> = lowercase_query.split_ascii_whitespace().collect();
-                        for item in model.items.iter_mut().filter(|item| {
-                            pat.iter().all(|w| item.name.to_lowercase().contains(w))
-                        }) {
-                            item_widget(channel, ui, item);
-                            if ui.available_size_before_wrap().x < BAR_PLOT_WIDTH {
-                                ui.end_row();
-                            }
-                        }
-                        let widget = Button::new(RichText::new("Import").heading().color(Color32::BLACK)).fill(Color32::GOLD);
-                        if ui.add(widget).clicked() {
-                            if let Some(paths) = rfd::FileDialog::new().pick_files() {
-                                model.import_paths(paths);
-                            }
-                        }
+                        render_items(model, channel, ui);
                     },
                 )
             });
@@ -411,6 +401,32 @@ impl eframe::App for SharedModel {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         let model = self.model.read();
         storage.set_string("model", serde_json::to_string(&*model).unwrap());
+    }
+}
+
+fn render_items(
+    mut model: RwLockWriteGuard<Model>,
+    channel: &Sender<ControlMessage>,
+    ui: &mut egui::Ui,
+) {
+    let lowercase_query = model.search_query.to_lowercase();
+    let pat: Vec<_> = lowercase_query.split_ascii_whitespace().collect();
+    for item in model
+        .items
+        .iter_mut()
+        .filter(|item| pat.iter().all(|w| item.name.to_lowercase().contains(w)))
+    {
+        render_item_frame(channel, ui, item);
+        if ui.available_size_before_wrap().x < BAR_PLOT_WIDTH {
+            ui.end_row();
+        }
+    }
+    let widget =
+        Button::new(RichText::new("Import").heading().color(Color32::BLACK)).fill(Color32::GOLD);
+    if ui.add(widget).clicked() {
+        if let Some(paths) = rfd::FileDialog::new().pick_files() {
+            model.import_paths(paths);
+        }
     }
 }
 
@@ -438,6 +454,7 @@ impl Model {
                 colour: PALETTE[self.id_counter as usize % PALETTE.len()],
                 bars: vec![0.0; BARS],
                 position: 0.0,
+                target_position: 0.0,
                 duration,
             };
 
@@ -448,7 +465,7 @@ impl Model {
     }
 }
 
-fn item_widget(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &mut Item) {
+fn render_item_frame(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &mut Item) {
     Frame::group(ui.style())
         .stroke(if matches!(item.status, ItemStatus::Playing) {
             Stroke::new(1.0, Color32::WHITE)
@@ -459,65 +476,67 @@ fn item_widget(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &mut I
         .show(ui, |ui| {
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
-                    let text = RichText::new(&item.name[0..24.min(item.name.len())])
+                    let text = RichText::new(&item.name[0..32.min(item.name.len())])
                         .color(Color32::WHITE)
                         .text_style(egui::TextStyle::Heading);
                     ui.label(text);
-                    match item.status {
-                        ItemStatus::Stopped | ItemStatus::Paused => {
-                            if ui.button("▶").clicked() {
-                                item.status = ItemStatus::Loading;
-                                channel.send(ControlMessage::Play(item.id)).unwrap();
-                            }
-                        }
-                        ItemStatus::Loading => {
-                            ui.spinner();
-                        }
-                        ItemStatus::Playing => {
-                            if ui.button("⏸").clicked() {
-                                item.status = ItemStatus::Paused;
-                                channel.send(ControlMessage::Pause(item.id)).unwrap();
-                            }
-                        }
-                    };
-                    let loop_button =
-                        Button::new(if item.looped { "🔁" } else { "🔂" }).frame(item.looped);
-                    if ui.add(loop_button).clicked() {
-                        item.looped = !item.looped;
-                        channel
-                            .send(ControlMessage::Loop(item.id, item.looped))
-                            .unwrap();
-                    }
                 });
                 render_bar_chart(channel, ui, item);
                 ui.horizontal(|ui| {
-                    if ui.button(if item.muted { "🔇" } else { "🔈" }).clicked() {
-                        item.muted = !item.muted;
-                        channel
-                            .send(ControlMessage::Mute(item.id, item.muted))
-                            .unwrap();
-                    }
-                    let original_volume = item.volume;
-                    ui.add(Slider::new(&mut item.volume, 0.0001..=1.0).show_value(false));
-                    if original_volume != item.volume {
-                        channel
-                            .send(ControlMessage::SetVolume(item.id, item.volume))
-                            .unwrap();
-                    }
+                    render_item_controls(channel, ui, item);
                 });
             });
         });
+}
+
+fn render_item_controls(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &mut Item) {
+    match item.status {
+        ItemStatus::Stopped | ItemStatus::Paused => {
+            if ui.button(RichText::new("▶").heading()).clicked() {
+                item.status = ItemStatus::Loading;
+                channel.send(ControlMessage::Play(item.id)).unwrap();
+            }
+        }
+        ItemStatus::Loading => {
+            ui.spinner();
+        }
+        ItemStatus::Playing => {
+            if ui.button(RichText::new("⏸").heading()).clicked() {
+                item.status = ItemStatus::Paused;
+                channel.send(ControlMessage::Pause(item.id)).unwrap();
+            }
+        }
+    };
+
+    let loop_button = Button::new(if item.looped { "🔁" } else { "🔂" }).frame(item.looped);
+    if ui.add(loop_button).clicked() {
+        item.looped = !item.looped;
+        channel
+            .send(ControlMessage::Loop(item.id, item.looped))
+            .unwrap();
+    }
+
+    if ui.button(if item.muted { "🔇" } else { "🔈" }).clicked() {
+        item.muted = !item.muted;
+        channel
+            .send(ControlMessage::Mute(item.id, item.muted))
+            .unwrap();
+    }
+
+    let original_volume = item.volume;
+    ui.add(Slider::new(&mut item.volume, 0.0001..=1.0).show_value(false));
+    if original_volume != item.volume {
+        channel
+            .send(ControlMessage::SetVolume(item.id, item.volume))
+            .unwrap();
+    }
 }
 
 fn render_bar_chart(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &mut Item) {
     let id = format!("frequency graph for {}", item.id);
     let factor = 0.4;
     let bg = ui.style().visuals.window_fill();
-    let dimmed = Color32::from_rgb(
-        ((1.0 - factor) * bg.r() as f32 + factor * item.colour.r() as f32) as u8,
-        ((1.0 - factor) * bg.g() as f32 + factor * item.colour.g() as f32) as u8,
-        ((1.0 - factor) * bg.b() as f32 + factor * item.colour.b() as f32) as u8,
-    );
+    let dimmed = bg.mix(factor, &item.colour);
 
     let plot_x = ui.cursor().left();
     let resp = Plot::new(id)
@@ -556,11 +575,16 @@ fn render_bar_chart(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &
             plot.bar_chart(chart);
         });
 
-    process_plot_events(channel, resp.response, plot_x, item);
+    item.position =
+        ui.ctx()
+            .animate_value_with_time(egui::Id::new(item.id), item.target_position as f32, 0.2)
+            as f64;
+    handle_bar_plot_interaction(channel, ui, resp.response, plot_x, item);
 }
 
-fn process_plot_events(
+fn handle_bar_plot_interaction(
     channel: &Sender<ControlMessage>,
+    ui: &mut egui::Ui,
     response: egui::Response,
     plot_x: f32,
     item: &mut Item,
@@ -570,6 +594,7 @@ fn process_plot_events(
         let duration = item.duration as f32;
         let new_position = item.position as f32 + drag_distance * duration / BAR_PLOT_WIDTH;
         let new_position = new_position.clamp(0.0, duration) as f64;
+
         channel
             .send(ControlMessage::Seek(item.id, new_position))
             .unwrap();
