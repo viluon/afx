@@ -2,8 +2,8 @@ mod colour_proxy;
 
 use anyhow::Result;
 use eframe::egui::plot::{Bar, BarChart, Plot};
-use eframe::egui::Button;
-use eframe::epaint::{Color32, Stroke};
+use eframe::egui::{Button, Resize, RichText, Slider};
+use eframe::epaint::{vec2, Color32, Stroke};
 use eframe::{egui, egui::Frame};
 use kira::manager::backend::cpal::CpalBackend;
 use kira::manager::{AudioManager, AudioManagerSettings};
@@ -112,8 +112,6 @@ fn recover(
         if item.status == ItemStatus::Playing {
             item.status = ItemStatus::Loading;
             tx.send(ControlMessage::Play(item.id)).unwrap();
-            tx.send(ControlMessage::Seek(item.id, item.position))
-                .unwrap();
         } else if item.status == ItemStatus::Loading {
             item.status = ItemStatus::Stopped;
         }
@@ -160,19 +158,19 @@ fn process_message(
 
     match msg {
         ControlMessage::Play(id) => {
-            let res = if let Some(handle) = handles.get_mut(&id) {
+            if let Some(handle) = handles.get_mut(&id) {
                 handle.resume(Tween::default())?;
-                None
             } else {
-                let (file, position, looped) = {
+                let (file, position, looped, volume) = {
                     let model = model.read();
                     let item = model.items.iter().find(|item| item.id == id).unwrap();
                     let path = item.stems[item.current_stem].path.clone();
-                    (path, item.position, item.looped)
+                    (path, item.position, item.looped, item.volume)
                 };
                 info!("loading {}", file);
                 let settings = StreamingSoundSettings::new()
                     .start_position(position)
+                    .volume(volume)
                     .loop_behavior(if looped {
                         Some(LoopBehavior {
                             start_position: 0.0,
@@ -190,24 +188,14 @@ fn process_message(
                         return Err(err.into());
                     }
                 };
-                // TODO: move static sound stuff to imports
-                let static_sound =
-                    StaticSoundData::from_file(&file, StaticSoundSettings::new()).unwrap();
                 info!("passing {} to manager", file);
-                let duration = static_sound.frames.len() as f64 / static_sound.sample_rate as f64;
-                let frames = static_sound.frames;
                 let handle = manager.play(sound)?;
                 handles.insert(id, handle);
-                Some((duration, frames))
-            };
+            }
             // we ignore the option here - the edit may not go through
             // if the item was deleted in the meantime
             edit_item(id, &mut |item| {
                 item.status = ItemStatus::Playing;
-                if let Some((duration, frames)) = &res {
-                    visualise_samples(item, frames);
-                    item.duration = *duration;
-                }
                 String::new()
             });
             Ok(())
@@ -262,6 +250,24 @@ fn process_message(
             }
             Ok(())
         }
+        ControlMessage::Mute(id, mute) => {
+            if let Some(handle) = handles.get_mut(&id) {
+                let model = model.read();
+                let item = model.items.iter().find(|item| item.id == id).unwrap();
+                handle.set_volume(if mute {
+                    0.0
+                } else {
+                    item.volume
+                }, Tween::default())?;
+            }
+            Ok(())
+        }
+        ControlMessage::SetVolume(id, volume) => {
+            if let Some(handle) = handles.get_mut(&id) {
+                handle.set_volume(volume, Tween::default())?;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -298,6 +304,8 @@ enum ControlMessage {
     SyncPlaybackStatus,
     Seek(u64, f64),
     Loop(u64, bool),
+    Mute(u64, bool),
+    SetVolume(u64, f64),
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Clone, Serialize, Deserialize)]
@@ -321,6 +329,7 @@ struct Item {
     stems: Vec<Stem>,
     current_stem: usize,
     volume: f64,
+    muted: bool,
     looped: bool,
     status: ItemStatus,
     colour: Color32,
@@ -358,15 +367,20 @@ impl eframe::App for SharedModel {
                 }
             }
 
-            ui.with_layout(
-                egui::Layout::left_to_right(egui::Align::LEFT).with_main_wrap(true),
-                |ui| {
-                    let channel = &self.play_channel;
-                    for item in model.items.iter_mut() {
-                        ui.scope(|ui| item_widget(channel, ui, item));
-                    }
-                },
-            );
+            Resize::default().show(ui, |ui| {
+                ui.allocate_ui(vec2(ui.available_size_before_wrap().x, 20.0), |ui| {
+                    ui.with_layout(
+                        egui::Layout::left_to_right(egui::Align::LEFT).with_main_wrap(true),
+                        |ui| {
+                            let channel = &self.play_channel;
+                            for item in model.items.iter_mut() {
+                                item_widget(channel, ui, item);
+                            }
+                            ui.label("hi there");
+                        },
+                    )
+                });
+            });
         });
 
         preview_files_being_dropped(ctx);
@@ -383,7 +397,11 @@ impl Model {
         self.items.extend(paths.into_iter().map(|path| {
             let name = path.file_name().unwrap().to_string_lossy().to_string();
             let path = path.display().to_string();
-            let i = Item {
+            let static_sound =
+                StaticSoundData::from_file(&path, StaticSoundSettings::new()).unwrap();
+            let duration = static_sound.frames.len() as f64 / static_sound.sample_rate as f64;
+
+            let mut i = Item {
                 id: self.id_counter,
                 name,
                 stems: vec![Stem {
@@ -392,13 +410,16 @@ impl Model {
                 }],
                 current_stem: 0,
                 volume: 1.0,
+                muted: false,
                 looped: false,
                 status: ItemStatus::Stopped,
                 colour: PALETTE[self.id_counter as usize % PALETTE.len()],
                 bars: vec![0.0; BARS],
                 position: 0.0,
-                duration: 0.0,
+                duration,
             };
+
+            visualise_samples(&mut i, &static_sound.frames);
             self.id_counter += 1;
             i
         }))
@@ -411,7 +432,10 @@ fn item_widget(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &mut I
         .show(ui, |ui| {
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
-                    ui.label(&item.name);
+                    let text = RichText::new(&item.name[0..24.min(item.name.len())])
+                        .color(Color32::WHITE)
+                        .text_style(egui::TextStyle::Heading);
+                    ui.label(text);
                     match item.status {
                         ItemStatus::Stopped | ItemStatus::Paused => {
                             if ui.button("▶").clicked() {
@@ -439,6 +463,24 @@ fn item_widget(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &mut I
                     }
                 });
                 render_bar_chart(channel, ui, item);
+                ui.horizontal(|ui| {
+                    if ui.button(if item.muted { "🔇" } else { "🔈" }).clicked() {
+                        item.muted = !item.muted;
+                        channel
+                            .send(ControlMessage::Mute(item.id, item.muted))
+                            .unwrap();
+                    }
+                    let original_volume = item.volume;
+                    ui.add_sized(
+                        vec2(BAR_PLOT_WIDTH, 0.0),
+                        Slider::new(&mut item.volume, 0.0001..=1.0).show_value(false),
+                    );
+                    if original_volume != item.volume {
+                        channel
+                            .send(ControlMessage::SetVolume(item.id, item.volume))
+                            .unwrap();
+                    }
+                });
             });
         });
 }
@@ -451,6 +493,8 @@ fn render_bar_chart(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &
     let resp = Plot::new(id)
         .height(30.0)
         .width(BAR_PLOT_WIDTH)
+        .include_y(1.0)
+        .include_y(-1.0)
         .allow_boxed_zoom(false)
         .allow_drag(false)
         .allow_scroll(false)
@@ -464,7 +508,9 @@ fn render_bar_chart(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &
             for (i, height) in item.bars.iter().copied().enumerate() {
                 let height = height as f64;
                 for direction in [-1.0, 1.0] {
-                    let mut bar = Bar::new(i as f64, direction * height);
+                    let muted_modifier = if item.muted { 0.0001 } else { 1.0 };
+                    let mut bar =
+                        Bar::new(i as f64, muted_modifier * item.volume * direction * height);
                     bar.bar_width = 0.15;
                     bar.stroke = Stroke::none();
                     let progress = i as f64 / item.bars.len() as f64;
