@@ -44,7 +44,9 @@ const PALETTE: [Color32; 12] = [
 ];
 
 const BARS: usize = 128;
-const BAR_PLOT_WIDTH: f32 = 240.0;
+const BAR_PLOT_WIDTH: f32 = 360.0;
+// TODO: lengthen the interval and tween the bar position
+const PLAYBACK_SYNC_INTERVAL: u64 = 25;
 
 fn main() {
     let subscriber = FmtSubscriber::builder()
@@ -68,10 +70,10 @@ fn main() {
             let tx = tx.clone();
             std::thread::spawn(move || process_control_messages(tx, rx, model));
         }
-        // sync playback status every 100 ms
+        // sync playback status every PLAYBACK_SYNC_INTERVAL ms
         let tx = tx.clone();
         std::thread::spawn(move || loop {
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            std::thread::sleep(std::time::Duration::from_millis(PLAYBACK_SYNC_INTERVAL));
             tx.send(ControlMessage::SyncPlaybackStatus).unwrap();
         });
     }
@@ -161,35 +163,7 @@ fn process_message(
             if let Some(handle) = handles.get_mut(&id) {
                 handle.resume(Tween::default())?;
             } else {
-                let (file, position, looped, volume) = {
-                    let model = model.read();
-                    let item = model.items.iter().find(|item| item.id == id).unwrap();
-                    let path = item.stems[item.current_stem].path.clone();
-                    (path, item.position, item.looped, item.volume)
-                };
-                info!("loading {}", file);
-                let settings = StreamingSoundSettings::new()
-                    .start_position(position)
-                    .volume(volume)
-                    .loop_behavior(if looped {
-                        Some(LoopBehavior {
-                            start_position: 0.0,
-                        })
-                    } else {
-                        None
-                    });
-                let sound = match StreamingSoundData::from_file(&file, settings) {
-                    Ok(sound) => sound,
-                    Err(err) => {
-                        edit_item(id, &mut |item| {
-                            item.status = ItemStatus::Stopped;
-                            String::new()
-                        });
-                        return Err(err.into());
-                    }
-                };
-                info!("passing {} to manager", file);
-                let handle = manager.play(sound)?;
+                let handle = begin_playback(model, id, edit_item, manager)?;
                 handles.insert(id, handle);
             }
             // we ignore the option here - the edit may not go through
@@ -254,11 +228,7 @@ fn process_message(
             if let Some(handle) = handles.get_mut(&id) {
                 let model = model.read();
                 let item = model.items.iter().find(|item| item.id == id).unwrap();
-                handle.set_volume(if mute {
-                    0.0
-                } else {
-                    item.volume
-                }, Tween::default())?;
+                handle.set_volume(if mute { 0.0 } else { item.volume }, Tween::default())?;
             }
             Ok(())
         }
@@ -269,6 +239,43 @@ fn process_message(
             Ok(())
         }
     }
+}
+
+fn begin_playback(
+    model: &Arc<RwLock<Model>>,
+    id: u64,
+    mut edit_item: impl FnMut(u64, &mut dyn FnMut(&mut Item) -> String) -> Option<String>,
+    manager: &mut AudioManager,
+) -> Result<StreamingSoundHandle<FromFileError>> {
+    let (file, position, looped, muted, volume) = {
+        let model = model.read();
+        let item = model.items.iter().find(|item| item.id == id).unwrap();
+        let path = item.stems[item.current_stem].path.clone();
+        (path, item.position, item.looped, item.muted, item.volume)
+    };
+    info!("loading {}", file);
+    let settings = StreamingSoundSettings::new()
+        .start_position(position)
+        .volume(if muted { 0.0 } else { volume })
+        .loop_behavior(if looped {
+            Some(LoopBehavior {
+                start_position: 0.0,
+            })
+        } else {
+            None
+        });
+    let sound = match StreamingSoundData::from_file(&file, settings) {
+        Ok(sound) => sound,
+        Err(err) => {
+            edit_item(id, &mut |item| {
+                item.status = ItemStatus::Stopped;
+                String::new()
+            });
+            return Err(err.into());
+        }
+    };
+    info!("passing {} to manager", file);
+    Ok(manager.play(sound)?)
 }
 
 fn visualise_samples(item: &mut Item, frames: &[kira::dsp::Frame]) {
@@ -344,6 +351,7 @@ struct Item {
 
 #[derive(PartialEq, Debug, Clone, Default, Serialize, Deserialize)]
 struct Model {
+    search_query: String,
     items: Vec<Item>,
     id_counter: u64,
 }
@@ -356,30 +364,44 @@ struct SharedModel {
 impl eframe::App for SharedModel {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let mut model = self.model.write();
-        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        ctx.request_repaint_after(std::time::Duration::from_millis(PLAYBACK_SYNC_INTERVAL));
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.label("Drag-and-drop files onto the window!");
-
-            if ui.button("Import").clicked() {
-                if let Some(paths) = rfd::FileDialog::new().pick_files() {
-                    model.import_paths(paths);
+            ui.allocate_ui_with_layout(
+                vec2(ui.available_size_before_wrap().x, 0.0),
+                egui::Layout::left_to_right(eframe::emath::Align::Center),
+                |ui| {
+                    ui.label("filter:");
+                    ui.text_edit_singleline(&mut model.search_query);
                 }
-            }
+            );
 
-            Resize::default().show(ui, |ui| {
-                ui.allocate_ui(vec2(ui.available_size_before_wrap().x, 20.0), |ui| {
-                    ui.with_layout(
-                        egui::Layout::left_to_right(egui::Align::LEFT).with_main_wrap(true),
-                        |ui| {
-                            let channel = &self.play_channel;
-                            for item in model.items.iter_mut() {
-                                item_widget(channel, ui, item);
+            let desired_size = ui.ctx().input().screen_rect.size();
+            let desired_size = vec2(desired_size.x * 0.9, 95.0);
+            ui.allocate_ui(desired_size, |ui| {
+                ui.with_layout(
+                    egui::Layout::left_to_right(egui::Align::LEFT).with_main_wrap(true),
+                    |ui| {
+                        ui.set_max_size(desired_size);
+                        let channel = &self.play_channel;
+                        let lowercase_query = model.search_query.to_lowercase();
+                        let pat: Vec<_> = lowercase_query.split_ascii_whitespace().collect();
+                        for item in model.items.iter_mut().filter(|item| {
+                            pat.iter().all(|w| item.name.to_lowercase().contains(w))
+                        }) {
+                            item_widget(channel, ui, item);
+                            if ui.available_size_before_wrap().x < BAR_PLOT_WIDTH {
+                                ui.end_row();
                             }
-                            ui.label("hi there");
-                        },
-                    )
-                });
+                        }
+                        let widget = Button::new(RichText::new("Import").heading().color(Color32::BLACK)).fill(Color32::GOLD);
+                        if ui.add(widget).clicked() {
+                            if let Some(paths) = rfd::FileDialog::new().pick_files() {
+                                model.import_paths(paths);
+                            }
+                        }
+                    },
+                )
             });
         });
 
@@ -428,6 +450,11 @@ impl Model {
 
 fn item_widget(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &mut Item) {
     Frame::group(ui.style())
+        .stroke(if matches!(item.status, ItemStatus::Playing) {
+            Stroke::new(1.0, Color32::WHITE)
+        } else {
+            ui.style().visuals.widgets.noninteractive.bg_stroke
+        })
         .fill(item.colour.linear_multiply(0.03))
         .show(ui, |ui| {
             ui.vertical(|ui| {
@@ -471,10 +498,7 @@ fn item_widget(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &mut I
                             .unwrap();
                     }
                     let original_volume = item.volume;
-                    ui.add_sized(
-                        vec2(BAR_PLOT_WIDTH, 0.0),
-                        Slider::new(&mut item.volume, 0.0001..=1.0).show_value(false),
-                    );
+                    ui.add(Slider::new(&mut item.volume, 0.0001..=1.0).show_value(false));
                     if original_volume != item.volume {
                         channel
                             .send(ControlMessage::SetVolume(item.id, item.volume))
@@ -487,7 +511,13 @@ fn item_widget(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &mut I
 
 fn render_bar_chart(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &mut Item) {
     let id = format!("frequency graph for {}", item.id);
-    let dimmed = item.colour.linear_multiply(0.1);
+    let factor = 0.4;
+    let bg = ui.style().visuals.window_fill();
+    let dimmed = Color32::from_rgb(
+        ((1.0 - factor) * bg.r() as f32 + factor * item.colour.r() as f32) as u8,
+        ((1.0 - factor) * bg.g() as f32 + factor * item.colour.g() as f32) as u8,
+        ((1.0 - factor) * bg.b() as f32 + factor * item.colour.b() as f32) as u8,
+    );
 
     let plot_x = ui.cursor().left();
     let resp = Plot::new(id)
@@ -511,7 +541,7 @@ fn render_bar_chart(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &
                     let muted_modifier = if item.muted { 0.0001 } else { 1.0 };
                     let mut bar =
                         Bar::new(i as f64, muted_modifier * item.volume * direction * height);
-                    bar.bar_width = 0.15;
+                    bar.bar_width = 0.4;
                     bar.stroke = Stroke::none();
                     let progress = i as f64 / item.bars.len() as f64;
                     bar.fill = if progress < item.position / item.duration {
