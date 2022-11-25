@@ -1,23 +1,24 @@
 mod colour_proxy;
 
 use anyhow::Result;
-use colour_proxy::ExtendedColourOps;
 use eframe::egui::plot::{Bar, BarChart, Plot};
+use eframe::egui::Button;
 use eframe::epaint::{Color32, Stroke};
 use eframe::{egui, egui::Frame};
 use kira::manager::backend::cpal::CpalBackend;
 use kira::manager::{AudioManager, AudioManagerSettings};
+use kira::sound::static_sound::{PlaybackState, StaticSoundData, StaticSoundSettings};
+use kira::sound::streaming::{StreamingSoundData, StreamingSoundHandle, StreamingSoundSettings};
 use kira::sound::FromFileError;
-use kira::sound::static_sound::{StaticSoundData, StaticSoundSettings, PlaybackState};
-use kira::sound::streaming::{StreamingSoundData, StreamingSoundSettings, StreamingSoundHandle};
 use kira::tween::Tween;
+use kira::LoopBehavior;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
-use tracing::{info, warn, Level, debug};
+use tracing::{debug, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 #[rustfmt::skip]
@@ -63,14 +64,15 @@ fn main() {
     {
         let model = model.clone();
         // start a background thread for audio playback
-        std::thread::spawn(move || process_control_messages(rx, model));
+        {
+            let tx = tx.clone();
+            std::thread::spawn(move || process_control_messages(tx, rx, model));
+        }
         // sync playback status every 100 ms
         let tx = tx.clone();
-        std::thread::spawn(move || {
-            loop {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                tx.send(ControlMessage::SyncPlaybackStatus).unwrap();
-            }
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            tx.send(ControlMessage::SyncPlaybackStatus).unwrap();
         });
     }
 
@@ -110,7 +112,8 @@ fn recover(
         if item.status == ItemStatus::Playing {
             item.status = ItemStatus::Loading;
             tx.send(ControlMessage::Play(item.id)).unwrap();
-            tx.send(ControlMessage::Seek(item.id, item.position)).unwrap();
+            tx.send(ControlMessage::Seek(item.id, item.position))
+                .unwrap();
         } else if item.status == ItemStatus::Loading {
             item.status = ItemStatus::Stopped;
         }
@@ -120,7 +123,11 @@ fn recover(
     Some(())
 }
 
-fn process_control_messages(rx: Receiver<ControlMessage>, model: Arc<RwLock<Model>>) {
+fn process_control_messages(
+    tx: Sender<ControlMessage>,
+    rx: Receiver<ControlMessage>,
+    model: Arc<RwLock<Model>>,
+) {
     let manager = AudioManager::<CpalBackend>::new(AudioManagerSettings::default());
     if let Err(err) = manager {
         warn!("Failed to create audio manager: {}", err);
@@ -131,7 +138,7 @@ fn process_control_messages(rx: Receiver<ControlMessage>, model: Arc<RwLock<Mode
     let mut handles = HashMap::<u64, StreamingSoundHandle<FromFileError>>::new();
 
     while let Ok(msg) = rx.recv() {
-        let res = process_message(msg, &mut manager, &mut handles, &model);
+        let res = process_message(msg, &tx, &mut manager, &mut handles, &model);
         if let Err(err) = res {
             warn!("Failed to process control message: {}", err);
         }
@@ -140,6 +147,7 @@ fn process_control_messages(rx: Receiver<ControlMessage>, model: Arc<RwLock<Mode
 
 fn process_message(
     msg: ControlMessage,
+    tx: &Sender<ControlMessage>,
     manager: &mut AudioManager,
     handles: &mut HashMap<u64, StreamingSoundHandle<FromFileError>>,
     model: &Arc<RwLock<Model>>,
@@ -156,11 +164,23 @@ fn process_message(
                 handle.resume(Tween::default())?;
                 None
             } else {
-                let file = edit_item(id, &mut |item| {
-                    item.stems[item.current_stem].path.clone()
-                }).unwrap();
+                let (file, position, looped) = {
+                    let model = model.read();
+                    let item = model.items.iter().find(|item| item.id == id).unwrap();
+                    let path = item.stems[item.current_stem].path.clone();
+                    (path, item.position, item.looped)
+                };
                 info!("loading {}", file);
-                let sound = match StreamingSoundData::from_file(&file, StreamingSoundSettings::new()) {
+                let settings = StreamingSoundSettings::new()
+                    .start_position(position)
+                    .loop_behavior(if looped {
+                        Some(LoopBehavior {
+                            start_position: 0.0,
+                        })
+                    } else {
+                        None
+                    });
+                let sound = match StreamingSoundData::from_file(&file, settings) {
                     Ok(sound) => sound,
                     Err(err) => {
                         edit_item(id, &mut |item| {
@@ -170,7 +190,9 @@ fn process_message(
                         return Err(err.into());
                     }
                 };
-                let static_sound = StaticSoundData::from_file(&file, StaticSoundSettings::new()).unwrap();
+                // TODO: move static sound stuff to imports
+                let static_sound =
+                    StaticSoundData::from_file(&file, StaticSoundSettings::new()).unwrap();
                 info!("passing {} to manager", file);
                 let duration = static_sound.frames.len() as f64 / static_sound.sample_rate as f64;
                 let frames = static_sound.frames;
@@ -203,10 +225,17 @@ fn process_message(
                 edit_item(id, &mut |item| {
                     item.position = handle.position();
                     if item.position >= item.duration || handle.state() == PlaybackState::Stopped {
-                        item.status = ItemStatus::Stopped;
                         item.position = 0.0;
-                        handle.stop(Tween::default()).unwrap();
                         to_remove.push(id);
+                        if item.looped {
+                            // FIXME this is a hack, since looping behaviour
+                            // can't be changed via a handle
+                            item.status = ItemStatus::Loading;
+                            tx.send(ControlMessage::Play(id)).unwrap();
+                        } else {
+                            item.status = ItemStatus::Stopped;
+                            handle.stop(Tween::default()).unwrap();
+                        }
                     }
                     String::new()
                 });
@@ -219,6 +248,17 @@ fn process_message(
         ControlMessage::Seek(id, target) => {
             if let Some(handle) = handles.get_mut(&id) {
                 handle.seek_to(target)?;
+            } else {
+                edit_item(id, &mut |item| {
+                    item.position = target;
+                    String::new()
+                });
+            }
+            Ok(())
+        }
+        ControlMessage::Loop(id, _do_loop) => {
+            if let Some(_handle) = handles.get_mut(&id) {
+                // TODO: implement looping via handles once it's supported
             }
             Ok(())
         }
@@ -230,7 +270,11 @@ fn visualise_samples(item: &mut Item, frames: &[kira::dsp::Frame]) {
     let mut bins = vec![0.0; BARS];
     let mut max = 0.0f32;
     let bin_size = frames.len() / bins.len();
-    debug!("processing {:#?} frames with bin size {}", frames.len(), bin_size);
+    debug!(
+        "processing {:#?} frames with bin size {}",
+        frames.len(),
+        bin_size
+    );
 
     for (i, bin) in bins.iter_mut().enumerate() {
         let start = i * bin_size;
@@ -253,6 +297,7 @@ enum ControlMessage {
     ChangeStem(u64, usize),
     SyncPlaybackStatus,
     Seek(u64, f64),
+    Loop(u64, bool),
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Clone, Serialize, Deserialize)]
@@ -280,6 +325,10 @@ struct Item {
     status: ItemStatus,
     colour: Color32,
     bars: Vec<f32>,
+    /// The position within the track, in seconds.
+    ///
+    /// This is effectively owned by the playback thread.
+    /// Changes from elsewhere will be overwritten.
     position: f64,
     duration: f64,
 }
@@ -303,23 +352,21 @@ impl eframe::App for SharedModel {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.label("Drag-and-drop files onto the window!");
 
-            ui.vertical(|ui| {
-                if ui.button("Import").clicked() {
-                    if let Some(paths) = rfd::FileDialog::new().pick_files() {
-                        model.import_paths(paths);
-                    }
+            if ui.button("Import").clicked() {
+                if let Some(paths) = rfd::FileDialog::new().pick_files() {
+                    model.import_paths(paths);
                 }
+            }
 
-                ui.with_layout(
-                    egui::Layout::left_to_right(egui::Align::LEFT).with_main_wrap(true),
-                    |ui| {
-                        let channel = &self.play_channel;
-                        for item in model.items.iter_mut() {
-                            ui.scope(|ui| item_widget(channel, ui, item));
-                        }
-                    },
-                );
-            });
+            ui.with_layout(
+                egui::Layout::left_to_right(egui::Align::LEFT).with_main_wrap(true),
+                |ui| {
+                    let channel = &self.play_channel;
+                    for item in model.items.iter_mut() {
+                        ui.scope(|ui| item_widget(channel, ui, item));
+                    }
+                },
+            );
         });
 
         preview_files_being_dropped(ctx);
@@ -359,37 +406,41 @@ impl Model {
 }
 
 fn item_widget(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &mut Item) {
-    use rgb::*;
-    let text_colour = item.colour.via_rgb(|c| c.map(|x| 255 - x));
-
-    let style = ui.style_mut();
-    let widget_style = &mut style.visuals.widgets;
-
-    widget_style.inactive.bg_fill = item.colour;
-    widget_style.inactive.fg_stroke.color = text_colour;
-    widget_style.noninteractive.bg_fill = item.colour;
-
-    Frame::group(ui.style()).show(ui, |ui| {
-        ui.vertical(|ui| {
-            ui.horizontal(|ui| {
-                ui.label(&item.name);
-                match item.status {
-                    ItemStatus::Stopped | ItemStatus::Paused => if ui.button("play").clicked() {
-                        item.status = ItemStatus::Loading;
-                        channel.send(ControlMessage::Play(item.id)).unwrap();
-                    },
-                    ItemStatus::Loading => {
-                        ui.spinner();
-                    },
-                    ItemStatus::Playing => if ui.button("pause").clicked() {
-                        item.status = ItemStatus::Paused;
-                        channel.send(ControlMessage::Pause(item.id)).unwrap();
-                    },
-                };
+    Frame::group(ui.style())
+        .fill(item.colour.linear_multiply(0.03))
+        .show(ui, |ui| {
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label(&item.name);
+                    match item.status {
+                        ItemStatus::Stopped | ItemStatus::Paused => {
+                            if ui.button("▶").clicked() {
+                                item.status = ItemStatus::Loading;
+                                channel.send(ControlMessage::Play(item.id)).unwrap();
+                            }
+                        }
+                        ItemStatus::Loading => {
+                            ui.spinner();
+                        }
+                        ItemStatus::Playing => {
+                            if ui.button("⏸").clicked() {
+                                item.status = ItemStatus::Paused;
+                                channel.send(ControlMessage::Pause(item.id)).unwrap();
+                            }
+                        }
+                    };
+                    let loop_button =
+                        Button::new(if item.looped { "🔁" } else { "🔂" }).frame(item.looped);
+                    if ui.add(loop_button).clicked() {
+                        item.looped = !item.looped;
+                        channel
+                            .send(ControlMessage::Loop(item.id, item.looped))
+                            .unwrap();
+                    }
+                });
+                render_bar_chart(channel, ui, item);
             });
-            render_bar_chart(channel, ui, item);
         });
-    });
 }
 
 fn render_bar_chart(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &mut Item) {
@@ -400,14 +451,14 @@ fn render_bar_chart(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &
     let resp = Plot::new(id)
         .height(30.0)
         .width(BAR_PLOT_WIDTH)
+        .allow_boxed_zoom(false)
+        .allow_drag(false)
+        .allow_scroll(false)
+        .allow_zoom(false)
         .show_axes([false, false])
         .show_background(false)
         .show_x(false)
         .show_y(false)
-        .allow_drag(false)
-        .allow_zoom(false)
-        .allow_boxed_zoom(false)
-        .allow_scroll(false)
         .show(ui, |plot| {
             let mut data = vec![];
             for (i, height) in item.bars.iter().copied().enumerate() {
@@ -417,7 +468,11 @@ fn render_bar_chart(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &
                     bar.bar_width = 0.15;
                     bar.stroke = Stroke::none();
                     let progress = i as f64 / item.bars.len() as f64;
-                    bar.fill = if progress < item.position / item.duration { item.colour } else { dimmed };
+                    bar.fill = if progress < item.position / item.duration {
+                        item.colour
+                    } else {
+                        dimmed
+                    };
                     data.push(bar);
                 }
             }
@@ -428,20 +483,32 @@ fn render_bar_chart(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &
     process_plot_events(channel, resp.response, plot_x, item);
 }
 
-fn process_plot_events(channel: &Sender<ControlMessage>, response: egui::Response, plot_x: f32, item: &mut Item) {
+fn process_plot_events(
+    channel: &Sender<ControlMessage>,
+    response: egui::Response,
+    plot_x: f32,
+    item: &mut Item,
+) {
     let drag_distance = response.drag_delta().x;
     if drag_distance != 0.0 {
         let duration = item.duration as f32;
         let new_position = item.position as f32 + drag_distance * duration / BAR_PLOT_WIDTH;
         let new_position = new_position.clamp(0.0, duration) as f64;
-        channel.send(ControlMessage::Seek(item.id, new_position)).unwrap();
+        channel
+            .send(ControlMessage::Seek(item.id, new_position))
+            .unwrap();
         return;
     }
-    if let Some(pos) = response.interact_pointer_pos().filter(|_| response.clicked()) {
+    if let Some(pos) = response
+        .interact_pointer_pos()
+        .filter(|_| response.clicked())
+    {
         let duration = item.duration as f32;
         let new_position = (pos.x - plot_x) * duration / BAR_PLOT_WIDTH;
         let new_position = new_position.clamp(0.0, duration) as f64;
-        channel.send(ControlMessage::Seek(item.id, new_position)).unwrap();
+        channel
+            .send(ControlMessage::Seek(item.id, new_position))
+            .unwrap();
     }
 }
 

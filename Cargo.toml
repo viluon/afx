@@ -18,6 +18,7 @@ tracing = "0.1.37"
 tracing-subscriber = "0.3.16"
 
 [profile.release]
+codegen-units = 1
 lto = true
 
 # workaround for slow MP3 load times in debug mode
