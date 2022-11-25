@@ -1,0 +1,53 @@
+name: Rust
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+    - name: build
+      run: cargo build --verbose --release
+    - name: UPX GitHub Action
+      uses: crazy-max/ghaction-upx@v2.1.0
+      with:
+        args: --best --lzma --color -v -o afx.upx
+        file: target/release/afx
+    - name: Upload a Build Artifact
+      uses: actions/upload-artifact@v3.1.1
+      with:
+        # Artifact name
+        name: Release binaries
+        # A file, directory or wildcard pattern that describes what to upload
+        path: |
+          target/release/afx
+          afx.upx
+        # The desired behavior if no files are found using the provided path.
+        retention-days: 90
+    - name: Automatic Releases
+      uses: marvinpinto/action-automatic-releases@v1.2.1
+      with:
+        # GitHub secret token
+        repo_token: "${{ secrets.GITHUB_TOKEN }}"
+        # Git tag (for automatic releases)
+        automatic_release_tag: latest
+        # Should this release be marked as a draft?
+        prerelease: true
+        # Release title (for automatic releases)
+        title: afx preview
+        # Assets to upload to the release
+        files: |
+          afx.upx
+          target/release/afx
+    - name: Run tests
+      run: cargo test --verbose --release
