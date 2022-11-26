@@ -27,7 +27,10 @@ jobs:
       uses: actions/cache@v3.0.11
       with:
         # A list of files, directories, and wildcard patterns to cache and restore
-        path: target/
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target/
         # An explicit key for restoring and saving the cache
         key: main
     - name: build
