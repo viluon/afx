@@ -2,7 +2,7 @@
 
 This thing is my attempt at a soundboard program.
 
-![](https://cdn.discordapp.com/attachments/808286848946274324/1046140622064582748/recording-2022-11-26T190558UTC.mp4)
+https://user-images.githubusercontent.com/7235381/204112926-93e98e67-3e9c-4bbb-be89-b4468943da80.mp4
 
 ### Why?
 
