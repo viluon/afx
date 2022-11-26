@@ -46,10 +46,11 @@ const PALETTE: [Color32; 12] = [
 
 const BARS: usize = 128;
 const BAR_PLOT_WIDTH: f32 = 360.0;
-// TODO: lengthen the interval and tween the bar position
-const PLAYBACK_SYNC_INTERVAL: u64 = 25;
+const PLAYBACK_SYNC_INTERVAL: u64 = 50;
 
 fn main() {
+    coz::thread_init();
+
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::TRACE)
         .finish();
@@ -69,13 +70,19 @@ fn main() {
         // start a background thread for audio playback
         {
             let tx = tx.clone();
-            std::thread::spawn(move || process_control_messages(tx, rx, model));
+            std::thread::spawn(move || {
+                coz::thread_init();
+                process_control_messages(tx, rx, model)
+            });
         }
         // sync playback status every PLAYBACK_SYNC_INTERVAL ms
         let tx = tx.clone();
-        std::thread::spawn(move || loop {
-            std::thread::sleep(std::time::Duration::from_millis(PLAYBACK_SYNC_INTERVAL));
-            tx.send(ControlMessage::SyncPlaybackStatus).unwrap();
+        std::thread::spawn(move || {
+            coz::thread_init();
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(PLAYBACK_SYNC_INTERVAL));
+                tx.send(ControlMessage::SyncPlaybackStatus).unwrap();
+            }
         });
     }
 
@@ -183,8 +190,13 @@ fn process_message(
         }
         ControlMessage::ChangeStem(_, _) => todo!(),
         ControlMessage::SyncPlaybackStatus => {
+            coz::scope!("playback sync");
+
             let mut to_remove = vec![];
-            for (&id, handle) in handles.iter_mut() {
+            for (&id, handle) in handles
+                .iter_mut()
+                .filter(|(_, h)| h.state() != PlaybackState::Paused)
+            {
                 edit_item(id, &mut |item| {
                     item.target_position = handle.position();
 
@@ -213,13 +225,12 @@ fn process_message(
         ControlMessage::Seek(id, target) => {
             if let Some(handle) = handles.get_mut(&id) {
                 handle.seek_to(target)?;
-            } else {
-                edit_item(id, &mut |item| {
-                    item.target_position = target;
-
-                    String::new()
-                });
             }
+            edit_item(id, &mut |item| {
+                item.target_position = target;
+
+                String::new()
+            });
             Ok(())
         }
         ControlMessage::Loop(id, _do_loop) => {
@@ -368,6 +379,7 @@ struct SharedModel {
 
 impl eframe::App for SharedModel {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        coz::scope!("frame time");
         let mut model = self.model.write();
         ctx.request_repaint_after(std::time::Duration::from_millis(PLAYBACK_SYNC_INTERVAL));
 
@@ -376,8 +388,22 @@ impl eframe::App for SharedModel {
                 vec2(ui.available_size_before_wrap().x, 0.0),
                 egui::Layout::left_to_right(eframe::emath::Align::Center),
                 |ui| {
-                    ui.label("filter:");
-                    ui.text_edit_singleline(&mut model.search_query);
+                    let search_field = egui::TextEdit::singleline(&mut model.search_query)
+                        .hint_text("type to search");
+                    let resp = ui.add(search_field);
+                    if !model.search_query.is_empty() {
+                        let button = Button::new("❌").frame(false);
+                        if ui.add(button).clicked()
+                            || (resp.lost_focus()
+                                && ui.ctx().input().key_pressed(egui::Key::Escape))
+                        {
+                            model.search_query.clear();
+                            resp.request_focus();
+                        }
+                    }
+                    if ui.ctx().input_mut().consume_key(egui::Modifiers::CTRL, egui::Key::F) {
+                        resp.request_focus();
+                    }
                 },
             );
 
@@ -432,15 +458,23 @@ fn render_items(
 
 impl Model {
     fn import_paths(&mut self, paths: Vec<PathBuf>) {
-        self.items.extend(paths.into_iter().map(|path| {
+        self.items.extend(paths.into_iter().flat_map(|path| {
             let name = path.file_name().unwrap().to_string_lossy().to_string();
             let path = path.display().to_string();
-            let static_sound =
-                StaticSoundData::from_file(&path, StaticSoundSettings::new()).unwrap();
+            let static_sound = match StaticSoundData::from_file(&path, StaticSoundSettings::new()) {
+                Ok(sound) => sound,
+                Err(e) => {
+                    report_import_error(&path, e);
+                    return None;
+                }
+            };
+
             let duration = static_sound.frames.len() as f64 / static_sound.sample_rate as f64;
+            let id = self.id_counter;
+            self.id_counter += 1;
 
             let mut i = Item {
-                id: self.id_counter,
+                id,
                 name,
                 stems: vec![Stem {
                     tag: "default".to_string(),
@@ -451,7 +485,7 @@ impl Model {
                 muted: false,
                 looped: false,
                 status: ItemStatus::Stopped,
-                colour: PALETTE[self.id_counter as usize % PALETTE.len()],
+                colour: PALETTE[id as usize % PALETTE.len()],
                 bars: vec![0.0; BARS],
                 position: 0.0,
                 target_position: 0.0,
@@ -459,10 +493,49 @@ impl Model {
             };
 
             visualise_samples(&mut i, &static_sound.frames);
-            self.id_counter += 1;
-            i
+            Some(i)
         }))
     }
+}
+
+fn report_import_error(path: &String, e: FromFileError) {
+    use std::io::ErrorKind;
+    use symphonia::core::errors;
+
+    warn!(
+        "failed to load {}: {}",
+        path,
+        match e {
+            FromFileError::NoDefaultTrack => "the file doesn't have a default track".to_string(),
+            FromFileError::UnknownSampleRate =>
+                "the sample rate could not be determined".to_string(),
+            FromFileError::UnsupportedChannelConfiguration =>
+                "the channel configuration of the file is not supported".to_string(),
+            FromFileError::IoError(io_err) => match io_err.kind() {
+                ErrorKind::NotFound => "the file could not be found".to_string(),
+                ErrorKind::PermissionDenied => "permission to read the file was denied".to_string(),
+                kind => format!("an IO error occurred: {}", kind),
+            },
+            FromFileError::SymphoniaError(symphonia_err) => match symphonia_err {
+                errors::Error::IoError(e) => format!("symphonia encountered an I/O error: {}", e),
+                errors::Error::DecodeError(e) =>
+                    format!("symphonia could not decode the file: {}", e),
+                errors::Error::SeekError(e) => match e {
+                    errors::SeekErrorKind::Unseekable => "this file is not seekable".to_string(),
+                    errors::SeekErrorKind::ForwardOnly =>
+                        "this file can only be seeked forward".to_string(),
+                    errors::SeekErrorKind::OutOfRange =>
+                        "the seek timestamp is out of range".to_string(),
+                    errors::SeekErrorKind::InvalidTrack => "the track ID is invalid".to_string(),
+                },
+                errors::Error::Unsupported(e) =>
+                    format!("symphonia does not support this format: {}", e),
+                errors::Error::LimitError(e) => format!("a limit error occurred: {}", e),
+                errors::Error::ResetRequired => "symphonia requires a reset".to_string(),
+            },
+            _ => "an unknown error occurred".to_string(),
+        }
+    );
 }
 
 fn render_item_frame(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &mut Item) {
@@ -482,10 +555,21 @@ fn render_item_frame(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: 
                     ui.label(text);
                 });
                 render_bar_chart(channel, ui, item);
-                ui.horizontal(|ui| {
-                    render_item_controls(channel, ui, item);
-                });
+                ui.allocate_ui_with_layout(
+                    vec2(0.0, 0.0),
+                    egui::Layout::left_to_right(egui::Align::Center).with_main_justify(true),
+                    |ui| {
+                        render_item_controls(channel, ui, item);
+                    }
+                );
             });
+        })
+        .response
+        .context_menu(|ui| {
+            if ui.button(RichText::new("Delete").color(RED)).clicked() {
+                warn!("oops");
+                ui.close_menu();
+            }
         });
 }
 
@@ -530,13 +614,21 @@ fn render_item_controls(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, ite
             .send(ControlMessage::SetVolume(item.id, item.volume))
             .unwrap();
     }
+
+    let minutes = (item.position / 60.0).floor() as u32;
+    let seconds = item.position % 60.0;
+    ui.label(format!("{:01}:{:05.2}", minutes, seconds));
 }
 
 fn render_bar_chart(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &mut Item) {
     let id = format!("frequency graph for {}", item.id);
-    let factor = 0.4;
     let bg = ui.style().visuals.window_fill();
-    let dimmed = bg.mix(factor, &item.colour);
+    let dimmed = bg.mix(0.4, &item.colour);
+
+    item.position =
+        ui.ctx()
+            .animate_value_with_time(egui::Id::new(item.id), item.target_position as f32, 0.06)
+            as f64;
 
     let plot_x = ui.cursor().left();
     let resp = Plot::new(id)
@@ -544,6 +636,7 @@ fn render_bar_chart(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &
         .width(BAR_PLOT_WIDTH)
         .include_y(1.0)
         .include_y(-1.0)
+        .set_margin_fraction(vec2(0.0, 0.0))
         .allow_boxed_zoom(false)
         .allow_drag(false)
         .allow_scroll(false)
@@ -562,29 +655,24 @@ fn render_bar_chart(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &
                         Bar::new(i as f64, muted_modifier * item.volume * direction * height);
                     bar.bar_width = 0.4;
                     bar.stroke = Stroke::none();
-                    let progress = i as f64 / item.bars.len() as f64;
-                    bar.fill = if progress < item.position / item.duration {
-                        item.colour
-                    } else {
-                        dimmed
-                    };
+                    let fill_level =
+                        ((item.position / item.duration) * item.bars.len() as f64 - i as f64)
+                        .clamp(0.0, 1.0);
+                    bar.fill = dimmed.mix(fill_level as f32, &item.colour);
                     data.push(bar);
                 }
+
+                coz::progress!("bar plot processing");
             }
             let chart = BarChart::new(data);
             plot.bar_chart(chart);
         });
 
-    item.position =
-        ui.ctx()
-            .animate_value_with_time(egui::Id::new(item.id), item.target_position as f32, 0.2)
-            as f64;
-    handle_bar_plot_interaction(channel, ui, resp.response, plot_x, item);
+    handle_bar_plot_interaction(channel, resp.response, plot_x, item);
 }
 
 fn handle_bar_plot_interaction(
     channel: &Sender<ControlMessage>,
-    ui: &mut egui::Ui,
     response: egui::Response,
     plot_x: f32,
     item: &mut Item,
