@@ -49,8 +49,6 @@ const BAR_PLOT_WIDTH: f32 = 360.0;
 const PLAYBACK_SYNC_INTERVAL: u64 = 50;
 
 fn main() {
-    coz::thread_init();
-
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::TRACE)
         .finish();
@@ -70,19 +68,13 @@ fn main() {
         // start a background thread for audio playback
         {
             let tx = tx.clone();
-            std::thread::spawn(move || {
-                coz::thread_init();
-                process_control_messages(tx, rx, model)
-            });
+            std::thread::spawn(move || process_control_messages(tx, rx, model));
         }
         // sync playback status every PLAYBACK_SYNC_INTERVAL ms
         let tx = tx.clone();
-        std::thread::spawn(move || {
-            coz::thread_init();
-            loop {
-                std::thread::sleep(std::time::Duration::from_millis(PLAYBACK_SYNC_INTERVAL));
-                tx.send(ControlMessage::SyncPlaybackStatus).unwrap();
-            }
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_millis(PLAYBACK_SYNC_INTERVAL));
+            tx.send(ControlMessage::SyncPlaybackStatus).unwrap();
         });
     }
 
@@ -190,7 +182,6 @@ fn process_message(
         }
         ControlMessage::ChangeStem(_, _) => todo!(),
         ControlMessage::SyncPlaybackStatus => {
-            coz::scope!("playback sync");
 
             let mut to_remove = vec![];
             for (&id, handle) in handles
@@ -379,7 +370,6 @@ struct SharedModel {
 
 impl eframe::App for SharedModel {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        coz::scope!("frame time");
         let mut model = self.model.write();
         ctx.request_repaint_after(std::time::Duration::from_millis(PLAYBACK_SYNC_INTERVAL));
 
@@ -661,8 +651,6 @@ fn render_bar_chart(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &
                     bar.fill = dimmed.mix(fill_level as f32, &item.colour);
                     data.push(bar);
                 }
-
-                coz::progress!("bar plot processing");
             }
             let chart = BarChart::new(data);
             plot.bar_chart(chart);
