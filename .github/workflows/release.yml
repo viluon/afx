@@ -2,7 +2,7 @@ name: Full cross-platform release
 
 on:
   release:
-    types: [published]
+    types: [created, published]
   workflow_dispatch:
 
 jobs:
@@ -22,4 +22,4 @@ jobs:
         with:
           RUSTTARGET: ${{ matrix.target }}
           EXTRA_FILES: "README.md LICENSE"
-          PRE_BUILD: pre-build-release.sh
+          PRE_BUILD: .github/pre-build-release.sh
