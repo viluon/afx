@@ -85,6 +85,7 @@ fn main() {
             recover(cc, tx.clone(), model.clone());
 
             Box::new(SharedModel {
+                import_state: None,
                 play_channel: tx,
                 model,
             })
@@ -182,7 +183,6 @@ fn process_message(
         }
         ControlMessage::ChangeStem(_, _) => todo!(),
         ControlMessage::SyncPlaybackStatus => {
-
             let mut to_remove = vec![];
             for (&id, handle) in handles
                 .iter_mut()
@@ -242,6 +242,14 @@ fn process_message(
             if let Some(handle) = handles.get_mut(&id) {
                 handle.set_volume(volume, Tween::default())?;
             }
+            Ok(())
+        }
+        ControlMessage::Delete(id) => {
+            if let Some(mut handle) = handles.remove(&id) {
+                handle.stop(Tween::default())?;
+            }
+            let mut model = model.write();
+            model.items.retain(|item| item.id != id);
             Ok(())
         }
     }
@@ -319,6 +327,22 @@ enum ControlMessage {
     Loop(u64, bool),
     Mute(u64, bool),
     SetVolume(u64, f64),
+    Delete(u64),
+}
+
+#[derive(PartialEq, Debug, Clone)]
+enum ImportMessage {
+    Cancelled,
+    Update(u64, ItemImportStatus),
+    Finished(Vec<Item>),
+}
+
+#[derive(PartialEq, PartialOrd, Debug, Clone)]
+enum ItemImportStatus {
+    Queued(String),
+    InProgress,
+    Finished,
+    Failed(String),
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Clone, Serialize, Deserialize)]
@@ -349,9 +373,12 @@ struct Item {
     bars: Vec<f32>,
     /// The position within the track, in seconds.
     ///
+    /// This should only ever be read, since it is animated by target_position.
+    position: f64,
+    /// The target (real) position within the track, in seconds.
+    ///
     /// This is effectively owned by the playback thread.
     /// Changes from elsewhere will be overwritten.
-    position: f64,
     target_position: f64,
     duration: f64,
 }
@@ -363,52 +390,98 @@ struct Model {
     id_counter: u64,
 }
 
+// TODO convert to a struct
+type ImportStatus = (Vec<(u64, String, ItemImportStatus)>, Vec<Item>);
+type SharedImportStatus = Arc<RwLock<ImportStatus>>;
+
 struct SharedModel {
+    import_state: Option<(Receiver<ImportMessage>, SharedImportStatus)>,
     play_channel: Sender<ControlMessage>,
     model: Arc<RwLock<Model>>,
 }
 
+impl SharedModel {
+    fn begin_import(&mut self) {
+        let model = self.model.clone();
+        let (sender, receiver) = channel();
+        self.import_state = Some((receiver, Arc::new(RwLock::new((vec![], vec![])))));
+
+        std::thread::spawn(move || {
+            if let Some(paths) = rfd::FileDialog::new().pick_files() {
+                let new_items = import_paths(
+                    sender.clone(),
+                    || {
+                        let mut model = model.write();
+                        let id = model.id_counter;
+                        model.id_counter += 1;
+                        id
+                    },
+                    paths,
+                );
+                sender.send(ImportMessage::Finished(new_items)).unwrap();
+            } else {
+                sender.send(ImportMessage::Cancelled).unwrap();
+            }
+        });
+    }
+}
+
 impl eframe::App for SharedModel {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let mut model = self.model.write();
+        let model = self.model.clone();
+        let mut model = model.write();
         ctx.request_repaint_after(std::time::Duration::from_millis(PLAYBACK_SYNC_INTERVAL));
+
+        egui::SidePanel::left("playlist menu")
+            .resizable(true)
+            .default_width(150.0)
+            .width_range(120.0..=400.0)
+            .show(ctx, |ui| {
+                // TODO: implement playlists
+                ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
+                    let mut s = true;
+                    ui.toggle_value(&mut s, RichText::new("📚 library").heading());
+                });
+            });
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.allocate_ui_with_layout(
                 vec2(ui.available_size_before_wrap().x, 0.0),
-                egui::Layout::left_to_right(eframe::emath::Align::Center),
+                egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
-                    let search_field = egui::TextEdit::singleline(&mut model.search_query)
-                        .hint_text("type to search");
-                    let resp = ui.add(search_field);
-                    if !model.search_query.is_empty() {
-                        let button = Button::new("❌").frame(false);
-                        if ui.add(button).clicked()
-                            || (resp.lost_focus()
-                                && ui.ctx().input().key_pressed(egui::Key::Escape))
-                        {
-                            model.search_query.clear();
-                            resp.request_focus();
-                        }
-                    }
-                    if ui.ctx().input_mut().consume_key(egui::Modifiers::CTRL, egui::Key::F) {
-                        resp.request_focus();
-                    }
+                    render_search_bar(&mut model, ui);
                 },
             );
 
             let desired_size = ui.ctx().input().screen_rect.size();
             let desired_size = vec2(desired_size.x * 0.9, 95.0);
-            ui.allocate_ui(desired_size, |ui| {
-                ui.with_layout(
-                    egui::Layout::left_to_right(egui::Align::LEFT).with_main_wrap(true),
-                    |ui| {
-                        ui.set_max_size(desired_size);
-                        let channel = &self.play_channel;
-                        render_items(model, channel, ui);
-                    },
-                )
-            });
+
+            ui.with_layout(
+                egui::Layout::left_to_right(egui::Align::LEFT).with_main_wrap(true),
+                |ui| {
+                    ui.set_max_size(desired_size);
+                    let channel = &self.play_channel;
+                    render_items(&mut model, channel, ui);
+                    let import_button =
+                        Button::new(RichText::new("Import").heading().color(Color32::BLACK))
+                            .fill(Color32::GOLD);
+                    if ui.add(import_button).clicked() && self.import_state.is_none() {
+                        self.begin_import();
+                    }
+
+                    if let Some((rx, state)) = &self.import_state {
+                        let (keep_win_open, imported) =
+                            render_import_progress(rx, state.clone(), ui);
+                        if !keep_win_open {
+                            self.import_state = None;
+                        }
+                        if let Some(items) = imported {
+                            info!("importing {} items", items.len());
+                            model.items.extend(items);
+                        }
+                    }
+                },
+            )
         });
 
         preview_files_being_dropped(ctx);
@@ -420,8 +493,116 @@ impl eframe::App for SharedModel {
     }
 }
 
+fn render_import_progress(
+    rx: &Receiver<ImportMessage>,
+    state: SharedImportStatus,
+    ui: &mut egui::Ui,
+) -> (bool, Option<Vec<Item>>) {
+    let mut keep_window_open = true;
+    let mut imported = None;
+
+    egui::Window::new("Import")
+        .default_pos(egui::Pos2::new(
+            ui.available_size_before_wrap().x / 2.0,
+            ui.available_size().y / 2.0,
+        ))
+        .show(ui.ctx(), |ui| {
+            let mut state = state.write();
+
+            if let Ok(msg) = rx.try_recv() {
+                process_import_message(msg, ui, &mut keep_window_open, &mut state);
+            }
+
+            ui.vertical(|ui| {
+                if state.0.is_empty() {
+                    ui.vertical_centered(|ui| ui.heading("Waiting for file selection..."));
+                    return;
+                }
+
+                for (_, name, status) in state.0.iter() {
+                    ui.horizontal(|ui| {
+                        match status {
+                            ItemImportStatus::Queued(_) => (),
+                            ItemImportStatus::InProgress => {
+                                ui.spinner();
+                            }
+                            ItemImportStatus::Finished => {
+                                ui.colored_label(GREEN, "✔");
+                            }
+                            ItemImportStatus::Failed(err) => {
+                                ui.colored_label(RED, "🗙").on_hover_text_at_pointer(err);
+                            }
+                        }
+                        ui.label(name);
+                    });
+                }
+
+                ui.horizontal(|ui| {
+                    if ui.button(RichText::new("Discard").color(RED)).clicked() {
+                        keep_window_open = false;
+                    }
+                    if ui.button(RichText::new("Import").color(GREEN)).clicked() {
+                        keep_window_open = false;
+                        imported = Some(state.1.drain(..).collect());
+                    }
+                });
+            });
+        });
+    (keep_window_open, imported)
+}
+
+fn process_import_message(
+    msg: ImportMessage,
+    ui: &mut egui::Ui,
+    keep_window_open: &mut bool,
+    state: &mut RwLockWriteGuard<ImportStatus>,
+) {
+    match msg {
+        ImportMessage::Cancelled => {
+            ui.label("Cancelled");
+            *keep_window_open = false;
+        }
+        ImportMessage::Update(id, status) => match status {
+            ItemImportStatus::Queued(name) => {
+                state.0.push((id, name, ItemImportStatus::InProgress));
+            }
+            s => {
+                if let Some((_, _, status)) = state.0.iter_mut().find(|(i, _, _)| *i == id) {
+                    *status = s;
+                }
+            }
+        },
+        ImportMessage::Finished(v) => {
+            debug!("render_import_progress received {} items", v.len());
+            state.1 = v;
+        }
+    }
+}
+
+fn render_search_bar(model: &mut RwLockWriteGuard<Model>, ui: &mut egui::Ui) {
+    let search_field =
+        egui::TextEdit::singleline(&mut model.search_query).hint_text("type to search");
+    let resp = ui.add(search_field);
+    if !model.search_query.is_empty() {
+        let button = Button::new("❌").frame(false);
+        if ui.add(button).clicked()
+            || (resp.lost_focus() && ui.ctx().input().key_pressed(egui::Key::Escape))
+        {
+            model.search_query.clear();
+            resp.request_focus();
+        }
+    }
+    if ui
+        .ctx()
+        .input_mut()
+        .consume_key(egui::Modifiers::CTRL, egui::Key::F)
+    {
+        resp.request_focus();
+    }
+}
+
 fn render_items(
-    mut model: RwLockWriteGuard<Model>,
+    model: &mut RwLockWriteGuard<Model>,
     channel: &Sender<ControlMessage>,
     ui: &mut egui::Ui,
 ) {
@@ -437,32 +618,43 @@ fn render_items(
             ui.end_row();
         }
     }
-    let widget =
-        Button::new(RichText::new("Import").heading().color(Color32::BLACK)).fill(Color32::GOLD);
-    if ui.add(widget).clicked() {
-        if let Some(paths) = rfd::FileDialog::new().pick_files() {
-            model.import_paths(paths);
-        }
-    }
 }
 
-impl Model {
-    fn import_paths(&mut self, paths: Vec<PathBuf>) {
-        self.items.extend(paths.into_iter().flat_map(|path| {
+fn import_paths(
+    tx: Sender<ImportMessage>,
+    mut fresh_id: impl FnMut() -> u64,
+    paths: Vec<PathBuf>,
+) -> Vec<Item> {
+    let v = paths
+        .into_iter()
+        .map(|path| {
             let name = path.file_name().unwrap().to_string_lossy().to_string();
             let path = path.display().to_string();
+            let id = fresh_id();
+            tx.send(ImportMessage::Update(
+                id,
+                ItemImportStatus::Queued(name.clone()),
+            ))
+            .unwrap();
+
+            (name, path, id)
+        })
+        .flat_map(|(name, path, id)| {
+            tx.send(ImportMessage::Update(id, ItemImportStatus::InProgress))
+                .unwrap();
+
             let static_sound = match StaticSoundData::from_file(&path, StaticSoundSettings::new()) {
                 Ok(sound) => sound,
                 Err(e) => {
-                    report_import_error(&path, e);
+                    let msg = report_import_error(e);
+                    warn!("failed to load {}: {}", path, msg);
+                    tx.send(ImportMessage::Update(id, ItemImportStatus::Failed(msg)))
+                        .unwrap();
                     return None;
                 }
             };
 
             let duration = static_sound.frames.len() as f64 / static_sound.sample_rate as f64;
-            let id = self.id_counter;
-            self.id_counter += 1;
-
             let mut i = Item {
                 id,
                 name,
@@ -483,49 +675,50 @@ impl Model {
             };
 
             visualise_samples(&mut i, &static_sound.frames);
+            tx.send(ImportMessage::Update(id, ItemImportStatus::Finished))
+                .unwrap();
             Some(i)
-        }))
-    }
+        })
+        .collect();
+    v
 }
 
-fn report_import_error(path: &String, e: FromFileError) {
+fn report_import_error(e: FromFileError) -> String {
     use std::io::ErrorKind;
     use symphonia::core::errors;
 
-    warn!(
-        "failed to load {}: {}",
-        path,
-        match e {
-            FromFileError::NoDefaultTrack => "the file doesn't have a default track".to_string(),
-            FromFileError::UnknownSampleRate =>
-                "the sample rate could not be determined".to_string(),
-            FromFileError::UnsupportedChannelConfiguration =>
-                "the channel configuration of the file is not supported".to_string(),
-            FromFileError::IoError(io_err) => match io_err.kind() {
-                ErrorKind::NotFound => "the file could not be found".to_string(),
-                ErrorKind::PermissionDenied => "permission to read the file was denied".to_string(),
-                kind => format!("an IO error occurred: {}", kind),
-            },
-            FromFileError::SymphoniaError(symphonia_err) => match symphonia_err {
-                errors::Error::IoError(e) => format!("symphonia encountered an I/O error: {}", e),
-                errors::Error::DecodeError(e) =>
-                    format!("symphonia could not decode the file: {}", e),
-                errors::Error::SeekError(e) => match e {
-                    errors::SeekErrorKind::Unseekable => "this file is not seekable".to_string(),
-                    errors::SeekErrorKind::ForwardOnly =>
-                        "this file can only be seeked forward".to_string(),
-                    errors::SeekErrorKind::OutOfRange =>
-                        "the seek timestamp is out of range".to_string(),
-                    errors::SeekErrorKind::InvalidTrack => "the track ID is invalid".to_string(),
-                },
-                errors::Error::Unsupported(e) =>
-                    format!("symphonia does not support this format: {}", e),
-                errors::Error::LimitError(e) => format!("a limit error occurred: {}", e),
-                errors::Error::ResetRequired => "symphonia requires a reset".to_string(),
-            },
-            _ => "an unknown error occurred".to_string(),
+    match e {
+        FromFileError::NoDefaultTrack => "the file doesn't have a default track".to_string(),
+        FromFileError::UnknownSampleRate => "the sample rate could not be determined".to_string(),
+        FromFileError::UnsupportedChannelConfiguration => {
+            "the channel configuration of the file is not supported".to_string()
         }
-    );
+        FromFileError::IoError(io_err) => match io_err.kind() {
+            ErrorKind::NotFound => "the file could not be found".to_string(),
+            ErrorKind::PermissionDenied => "permission to read the file was denied".to_string(),
+            kind => format!("an IO error occurred: {}", kind),
+        },
+        FromFileError::SymphoniaError(symphonia_err) => match symphonia_err {
+            errors::Error::IoError(e) => format!("symphonia encountered an I/O error: {}", e),
+            errors::Error::DecodeError(e) => format!("symphonia could not decode the file: {}", e),
+            errors::Error::SeekError(e) => match e {
+                errors::SeekErrorKind::Unseekable => "this file is not seekable".to_string(),
+                errors::SeekErrorKind::ForwardOnly => {
+                    "this file can only be seeked forward".to_string()
+                }
+                errors::SeekErrorKind::OutOfRange => {
+                    "the seek timestamp is out of range".to_string()
+                }
+                errors::SeekErrorKind::InvalidTrack => "the track ID is invalid".to_string(),
+            },
+            errors::Error::Unsupported(e) => {
+                format!("symphonia does not support this format: {}", e)
+            }
+            errors::Error::LimitError(e) => format!("a limit error occurred: {}", e),
+            errors::Error::ResetRequired => "symphonia requires a reset".to_string(),
+        },
+        _ => "an unknown error occurred".to_string(),
+    }
 }
 
 fn render_item_frame(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &mut Item) {
@@ -550,14 +743,14 @@ fn render_item_frame(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: 
                     egui::Layout::left_to_right(egui::Align::Center).with_main_justify(true),
                     |ui| {
                         render_item_controls(channel, ui, item);
-                    }
+                    },
                 );
             });
         })
         .response
         .context_menu(|ui| {
             if ui.button(RichText::new("Delete").color(RED)).clicked() {
-                warn!("oops");
+                channel.send(ControlMessage::Delete(item.id)).unwrap();
                 ui.close_menu();
             }
         });
@@ -645,8 +838,8 @@ fn render_bar_chart(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &
                         Bar::new(i as f64, muted_modifier * item.volume * direction * height);
                     bar.bar_width = 0.4;
                     bar.stroke = Stroke::none();
-                    let fill_level =
-                        ((item.position / item.duration) * item.bars.len() as f64 - i as f64)
+                    let fill_level = ((item.position / item.duration) * item.bars.len() as f64
+                        - i as f64)
                         .clamp(0.0, 1.0);
                     bar.fill = dimmed.mix(fill_level as f32, &item.colour);
                     data.push(bar);
@@ -665,6 +858,7 @@ fn handle_bar_plot_interaction(
     plot_x: f32,
     item: &mut Item,
 ) {
+    let response = response.on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
     let drag_distance = response.drag_delta().x;
     if drag_distance != 0.0 {
         let duration = item.duration as f32;
