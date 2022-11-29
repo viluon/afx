@@ -342,6 +342,8 @@ fn render_import_progress(
     let mut imported = None;
 
     egui::Window::new("Import")
+        .scroll2([false, true])
+        .resizable(false)
         .default_pos(egui::Pos2::new(
             ui.available_size_before_wrap().x / 2.0,
             ui.available_size().y / 2.0,

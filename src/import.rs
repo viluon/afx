@@ -40,6 +40,8 @@ fn import_paths(
     mut fresh_id: impl FnMut() -> u64,
     paths: Vec<PathBuf>,
 ) -> Vec<Item> {
+    use rayon::prelude::*;
+
     paths
         .into_iter()
         .map(|path| {
@@ -52,48 +54,52 @@ fn import_paths(
             ))
             .unwrap();
 
-            (name, path, id)
+            (name, path, id, tx.clone())
         })
-        .flat_map(|(name, path, id)| {
-            tx.send(ImportMessage::Update(id, ItemImportStatus::InProgress))
+        .collect::<Vec<_>>()
+        .into_par_iter()
+        .flat_map(|(name, path, id, tx)| {
+            create_item(tx, id, path, name)
+        })
+        .collect()
+}
+
+fn create_item(tx: Sender<ImportMessage>, id: u64, path: String, name: String) -> Option<Item> {
+    tx.send(ImportMessage::Update(id, ItemImportStatus::InProgress))
+        .unwrap();
+    let static_sound = match StaticSoundData::from_file(&path, StaticSoundSettings::new()) {
+        Ok(sound) => sound,
+        Err(e) => {
+            let msg = report_import_error(e);
+            warn!("failed to load {}: {}", path, msg);
+            tx.send(ImportMessage::Update(id, ItemImportStatus::Failed(msg)))
                 .unwrap();
-
-            let static_sound = match StaticSoundData::from_file(&path, StaticSoundSettings::new()) {
-                Ok(sound) => sound,
-                Err(e) => {
-                    let msg = report_import_error(e);
-                    warn!("failed to load {}: {}", path, msg);
-                    tx.send(ImportMessage::Update(id, ItemImportStatus::Failed(msg)))
-                        .unwrap();
-                    return None;
-                }
-            };
-
-            let duration = static_sound.frames.len() as f64 / static_sound.sample_rate as f64;
-            let mut i = Item {
-                id,
-                name,
-                stems: vec![Stem {
-                    tag: "default".to_string(),
-                    path,
-                }],
-                current_stem: 0,
-                volume: 1.0,
-                muted: false,
-                looped: false,
-                status: ItemStatus::Stopped,
-                colour: PALETTE[id as usize % PALETTE.len()],
-                bars: vec![0.0; BARS],
-                position: 0.0,
-                target_position: 0.0,
-                duration,
-            };
-
-            visualise_samples(&mut i, &static_sound.frames);
-            tx.send(ImportMessage::Update(id, ItemImportStatus::Finished))
-                .unwrap();
-            Some(i)
-        }).collect()
+            return None;
+        }
+    };
+    let duration = static_sound.frames.len() as f64 / static_sound.sample_rate as f64;
+    let mut i = Item {
+        id,
+        name,
+        stems: vec![Stem {
+            tag: "default".to_string(),
+            path,
+        }],
+        current_stem: 0,
+        volume: 1.0,
+        muted: false,
+        looped: false,
+        status: ItemStatus::Stopped,
+        colour: PALETTE[id as usize % PALETTE.len()],
+        bars: vec![0.0; BARS],
+        position: 0.0,
+        target_position: 0.0,
+        duration,
+    };
+    visualise_samples(&mut i, &static_sound.frames);
+    tx.send(ImportMessage::Update(id, ItemImportStatus::Finished))
+        .unwrap();
+    Some(i)
 }
 
 pub fn process_import_message(
