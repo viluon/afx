@@ -13,7 +13,13 @@ impl SharedModel {
     pub fn begin_import(&mut self) {
         let model = self.model.clone();
         let (sender, receiver) = channel();
-        self.import_state = Some((receiver, Arc::new(RwLock::new((vec![], vec![])))));
+        self.import_state = Some((
+            receiver,
+            Arc::new(RwLock::new(ImportState {
+                items_in_progress: vec![],
+                finished: vec![],
+            })),
+        ));
 
         std::thread::spawn(move || {
             if let Some(paths) = rfd::FileDialog::new()
@@ -24,9 +30,7 @@ impl SharedModel {
                     sender.clone(),
                     || {
                         let mut model = model.write();
-                        let id = model.id_counter;
-                        model.id_counter += 1;
-                        id
+                        model.fresh_id()
                     },
                     paths,
                 );
@@ -107,7 +111,7 @@ pub fn process_import_message(
     msg: ImportMessage,
     ui: &mut egui::Ui,
     keep_window_open: &mut bool,
-    state: &mut RwLockWriteGuard<ImportStatus>,
+    state: &mut RwLockWriteGuard<ImportState>,
 ) {
     match msg {
         ImportMessage::Cancelled => {
@@ -116,17 +120,23 @@ pub fn process_import_message(
         }
         ImportMessage::Update(id, status) => match status {
             ItemImportStatus::Queued(name) => {
-                state.0.push((id, name, ItemImportStatus::Waiting));
+                state
+                    .items_in_progress
+                    .push((id, name, ItemImportStatus::Waiting));
             }
             s => {
-                if let Some((_, _, status)) = state.0.iter_mut().find(|(i, _, _)| *i == id) {
+                if let Some((_, _, status)) = state
+                    .items_in_progress
+                    .iter_mut()
+                    .find(|(i, _, _)| *i == id)
+                {
                     *status = s;
                 }
             }
         },
         ImportMessage::Finished(v) => {
             debug!("render_import_progress received {} items", v.len());
-            state.1 = v;
+            state.finished = v;
         }
     }
 }

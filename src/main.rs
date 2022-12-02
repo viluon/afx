@@ -211,6 +211,19 @@ fn process_message(
             model.items.retain(|item| item.id != id);
             Ok(())
         }
+        ControlMessage::AddToPlaylist {
+            item_id,
+            playlist_id,
+        } => {
+            let mut model = model.write();
+            let playlist = model
+                .playlists
+                .iter_mut()
+                .find(|playlist| playlist.id == playlist_id)
+                .unwrap();
+            playlist.items.push(item_id);
+            Ok(())
+        }
     }
 }
 

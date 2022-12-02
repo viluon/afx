@@ -15,6 +15,7 @@ pub enum ControlMessage {
     Mute(u64, bool),
     SetVolume(u64, f64),
     Delete(u64),
+    AddToPlaylist { item_id: u64, playlist_id: u64 },
 }
 
 #[derive(PartialEq, Debug, Clone)]
@@ -24,7 +25,7 @@ pub enum ImportMessage {
     Finished(Vec<Item>),
 }
 
-#[derive(PartialEq, PartialOrd, Debug, Clone)]
+#[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Clone)]
 pub enum ItemImportStatus {
     Queued(String),
     Waiting,
@@ -75,15 +76,33 @@ pub struct Item {
 pub struct Model {
     pub search_query: String,
     pub items: Vec<Item>,
+    pub playlists: Vec<Playlist>,
+    pub selected_playlist: Option<u64>,
     pub id_counter: u64,
 }
 
-// TODO convert to a struct
-pub type ImportStatus = (Vec<(u64, String, ItemImportStatus)>, Vec<Item>);
-pub type SharedImportStatus = Arc<RwLock<ImportStatus>>;
+impl Model {
+    pub fn fresh_id(&mut self) -> u64 {
+        self.id_counter += 1;
+        self.id_counter
+    }
+}
+
+#[derive(PartialEq, Debug, Clone, Serialize, Deserialize)]
+pub struct Playlist {
+    pub id: u64,
+    pub name: String,
+    pub items: Vec<u64>,
+}
+
+pub struct ImportState {
+    pub items_in_progress: Vec<(u64, String, ItemImportStatus)>,
+    pub finished: Vec<Item>,
+}
+pub type SharedImportState = Arc<RwLock<ImportState>>;
 
 pub struct SharedModel {
-    pub import_state: Option<(Receiver<ImportMessage>, SharedImportStatus)>,
+    pub import_state: Option<(Receiver<ImportMessage>, SharedImportState)>,
     pub play_channel: Sender<ControlMessage>,
     pub model: Arc<RwLock<Model>>,
 }
