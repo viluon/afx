@@ -241,7 +241,7 @@ fn render_bar_chart(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &
         .show(ui, |plot| {
             let mut data = Vec::with_capacity(item.bars.len() * 2);
             for (i, height) in item.bars.iter().copied().enumerate() {
-                let height = height as f64;
+                let height = height as f64 / 255.0;
                 for direction in [-1.0, 1.0] {
                     let muted_modifier = if item.muted { 0.0001 } else { 1.0 };
                     let mut bar =
@@ -378,6 +378,7 @@ fn render_import_progress(
                     return;
                 }
 
+                let mut finished = 0;
                 for (_, name, status) in state.0.iter() {
                     ui.horizontal(|ui| {
                         match status {
@@ -392,6 +393,7 @@ fn render_import_progress(
                             ItemImportStatus::Finished => {
                                 ui.colored_label(GREEN, "✔")
                                     .on_hover_text_at_pointer("finished");
+                                finished += 1;
                             }
                             ItemImportStatus::Failed(err) => {
                                 ui.colored_label(RED, "🗙").on_hover_text_at_pointer(err);
@@ -408,10 +410,10 @@ fn render_import_progress(
                     {
                         keep_window_open = false;
                     }
-                    if ui
-                        .button(RichText::new("Import").heading().color(GREEN))
-                        .clicked()
-                    {
+                    let import_action = RichText::new(format!("Add {} tracks to library", finished))
+                                .heading()
+                                .color(GREEN);
+                    if ui.button(import_action).clicked() {
                         keep_window_open = false;
                         imported = Some(state.1.drain(..).collect());
                     }

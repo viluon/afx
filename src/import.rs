@@ -16,7 +16,10 @@ impl SharedModel {
         self.import_state = Some((receiver, Arc::new(RwLock::new((vec![], vec![])))));
 
         std::thread::spawn(move || {
-            if let Some(paths) = rfd::FileDialog::new().pick_files() {
+            if let Some(paths) = rfd::FileDialog::new()
+                .set_title("Choose files to import")
+                .pick_files()
+            {
                 let new_items = import_paths(
                     sender.clone(),
                     || {
