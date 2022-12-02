@@ -1,8 +1,8 @@
 use eframe::epaint::Color32;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
+use std::sync::Arc;
 
 #[derive(PartialEq, PartialOrd, Debug, Clone)]
 pub enum ControlMessage {
@@ -27,6 +27,7 @@ pub enum ImportMessage {
 #[derive(PartialEq, PartialOrd, Debug, Clone)]
 pub enum ItemImportStatus {
     Queued(String),
+    Waiting,
     InProgress,
     Finished,
     Failed(String),
@@ -57,7 +58,7 @@ pub struct Item {
     pub looped: bool,
     pub status: ItemStatus,
     pub colour: Color32,
-    pub bars: Vec<f32>,
+    pub bars: Vec<u8>,
     /// The position within the track, in seconds.
     ///
     /// This should only ever be read, since it is animated by target_position.

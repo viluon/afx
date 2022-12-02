@@ -1,8 +1,8 @@
 use crate::model::*;
 use eframe::egui;
 use parking_lot::RwLock;
-use std::sync::Arc;
 use std::sync::mpsc::Sender;
+use std::sync::Arc;
 
 impl eframe::App for SharedModel {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {

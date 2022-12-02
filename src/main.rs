@@ -8,19 +8,19 @@ use model::*;
 use ui::*;
 
 use anyhow::Result;
-use kira::LoopBehavior;
-use kira::manager::{AudioManager, AudioManagerSettings};
 use kira::manager::backend::cpal::CpalBackend;
-use kira::sound::FromFileError;
+use kira::manager::{AudioManager, AudioManagerSettings};
 use kira::sound::static_sound::PlaybackState;
 use kira::sound::streaming::{StreamingSoundData, StreamingSoundHandle, StreamingSoundSettings};
+use kira::sound::FromFileError;
 use kira::tween::Tween;
+use kira::LoopBehavior;
 use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::mpsc::{channel, Receiver, Sender};
-use tracing_subscriber::FmtSubscriber;
+use std::sync::Arc;
 use tracing::{info, warn, Level};
+use tracing_subscriber::FmtSubscriber;
 
 fn main() {
     let subscriber = FmtSubscriber::builder()
@@ -33,6 +33,14 @@ fn main() {
         drag_and_drop_support: true,
         ..Default::default()
     };
+
+    rayon::ThreadPoolBuilder::new()
+        .start_handler(|_| {
+            use thread_priority::*;
+            set_current_thread_priority(ThreadPriority::Min).unwrap();
+        })
+        .build_global()
+        .unwrap();
 
     let (tx, rx) = channel();
     let model = Arc::new(RwLock::new(Model::default()));

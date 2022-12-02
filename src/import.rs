@@ -1,12 +1,12 @@
 use crate::model::*;
 use crate::ui::*;
 use eframe::egui;
-use kira::sound::FromFileError;
 use kira::sound::static_sound::{StaticSoundData, StaticSoundSettings};
+use kira::sound::FromFileError;
 use parking_lot::{RwLock, RwLockWriteGuard};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::mpsc::{channel, Sender};
+use std::sync::Arc;
 use tracing::{debug, warn};
 
 impl SharedModel {
@@ -58,9 +58,7 @@ fn import_paths(
         })
         .collect::<Vec<_>>()
         .into_par_iter()
-        .flat_map(|(name, path, id, tx)| {
-            create_item(tx, id, path, name)
-        })
+        .flat_map(|(name, path, id, tx)| create_item(tx, id, path, name))
         .collect()
 }
 
@@ -91,12 +89,12 @@ fn create_item(tx: Sender<ImportMessage>, id: u64, path: String, name: String) -
         looped: false,
         status: ItemStatus::Stopped,
         colour: PALETTE[id as usize % PALETTE.len()],
-        bars: vec![0.0; BARS],
+        bars: vec![],
         position: 0.0,
         target_position: 0.0,
         duration,
     };
-    visualise_samples(&mut i, &static_sound.frames);
+    i.bars = visualise_samples(&static_sound.frames);
     tx.send(ImportMessage::Update(id, ItemImportStatus::Finished))
         .unwrap();
     Some(i)
@@ -115,7 +113,7 @@ pub fn process_import_message(
         }
         ImportMessage::Update(id, status) => match status {
             ItemImportStatus::Queued(name) => {
-                state.0.push((id, name, ItemImportStatus::InProgress));
+                state.0.push((id, name, ItemImportStatus::Waiting));
             }
             s => {
                 if let Some((_, _, status)) = state.0.iter_mut().find(|(i, _, _)| *i == id) {
@@ -130,7 +128,7 @@ pub fn process_import_message(
     }
 }
 
-fn visualise_samples(item: &mut Item, frames: &[kira::dsp::Frame]) {
+fn visualise_samples(frames: &[kira::dsp::Frame]) -> Vec<u8> {
     // collect samples into bins
     let mut bins = vec![0.0; BARS];
     let mut max = 0.0f32;
@@ -152,7 +150,9 @@ fn visualise_samples(item: &mut Item, frames: &[kira::dsp::Frame]) {
         max = max.max(*bin);
     }
 
-    item.bars = bins.into_iter().map(|bin| bin / max).collect();
+    bins.into_iter()
+        .map(|bin| (255.0 * (bin / max)).round() as u8)
+        .collect()
 }
 
 fn report_import_error(e: FromFileError) -> String {

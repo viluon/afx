@@ -1,10 +1,10 @@
 use crate::colour_proxy::ExtendedColourOps;
 use crate::model::*;
-use eframe::{egui, egui::Frame};
-use eframe::egui::{Button, RichText, Slider};
 use eframe::egui::plot::{Bar, BarChart, Plot};
+use eframe::egui::{Button, RichText, Slider};
 use eframe::epaint::{vec2, Color32, Stroke};
-use parking_lot::{RwLockWriteGuard};
+use eframe::{egui, egui::Frame};
+use parking_lot::RwLockWriteGuard;
 use std::sync::mpsc::{Receiver, Sender};
 use tracing::info;
 
@@ -58,25 +58,13 @@ impl SharedModel {
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
                     render_search_bar(&mut model, ui);
-                },
-            );
 
-            let desired_size = ui.ctx().input().screen_rect.size();
-            let desired_size = vec2(desired_size.x * 0.9, 95.0);
-
-            ui.with_layout(
-                egui::Layout::left_to_right(egui::Align::LEFT).with_main_wrap(true),
-                |ui| {
-                    ui.set_max_size(desired_size);
-                    let channel = &self.play_channel;
-                    render_items(&mut model, channel, ui);
                     let import_button =
                         Button::new(RichText::new("Import").heading().color(Color32::BLACK))
                             .fill(Color32::GOLD);
                     if ui.add(import_button).clicked() && self.import_state.is_none() {
                         self.begin_import();
                     }
-
                     if let Some((rx, state)) = &self.import_state {
                         let (keep_win_open, imported) =
                             render_import_progress(rx, state.clone(), ui);
@@ -89,13 +77,59 @@ impl SharedModel {
                         }
                     }
                 },
-            )
+            );
+
+            ui.vertical(|ui| {
+                self.render_items(model, ui);
+            })
         });
 
         preview_files_being_dropped(ctx);
     }
-}
 
+    fn render_items(&mut self, mut model: RwLockWriteGuard<Model>, ui: &mut egui::Ui) {
+        let channel = &self.play_channel;
+        let lowercase_query = model.search_query.to_lowercase();
+        let pat: Vec<_> = lowercase_query.split_ascii_whitespace().collect();
+        let filtered_indices = model
+            .items
+            .iter_mut()
+            .enumerate()
+            .filter(|(_, item)| {
+                pat.iter()
+                    .find(|w| "playing".starts_with(**w))
+                    .filter(|_| item.status == ItemStatus::Playing)
+                    .is_some()
+                    || pat.iter().all(|w| item.name.to_lowercase().contains(w))
+            })
+            .map(|(i, _)| i)
+            .collect::<Vec<_>>();
+
+        let items_per_row = (ui.available_width() / BAR_PLOT_WIDTH).floor() as usize;
+        egui::ScrollArea::vertical()
+            .auto_shrink([false; 2])
+            .show_rows(
+                ui,
+                100.0,
+                filtered_indices.len() / items_per_row + 1,
+                |ui, row_range| {
+                    for row in row_range {
+                        ui.horizontal(|ui| {
+                            for i in 0..items_per_row {
+                                let index = row * items_per_row + i;
+                                if index >= filtered_indices.len() {
+                                    break;
+                                }
+                                let item_index = filtered_indices[index];
+                                let item = &mut model.items[item_index];
+                                render_item_frame(channel, ui, item);
+                            }
+                        });
+                    }
+                },
+            );
+    }
+}
 
 fn render_item_frame(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &mut Item) {
     Frame::group(ui.style())
@@ -110,8 +144,8 @@ fn render_item_frame(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: 
                 ui.horizontal(|ui| {
                     let text = RichText::new(&item.name[0..32.min(item.name.len())])
                         .color(Color32::WHITE)
-                        .text_style(egui::TextStyle::Heading);
-                    ui.label(text);
+                        .heading();
+                    ui.label(text).on_hover_text_at_pointer(&item.name);
                 });
                 render_bar_chart(channel, ui, item);
                 ui.allocate_ui_with_layout(
@@ -200,12 +234,12 @@ fn render_bar_chart(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &
         .allow_drag(false)
         .allow_scroll(false)
         .allow_zoom(false)
-        .show_axes([false, false])
+        .show_axes([false; 2])
         .show_background(false)
         .show_x(false)
         .show_y(false)
         .show(ui, |plot| {
-            let mut data = vec![];
+            let mut data = Vec::with_capacity(item.bars.len() * 2);
             for (i, height) in item.bars.iter().copied().enumerate() {
                 let height = height as f64;
                 for direction in [-1.0, 1.0] {
@@ -225,16 +259,15 @@ fn render_bar_chart(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &
             plot.bar_chart(chart);
         });
 
-    handle_bar_plot_interaction(channel, resp.response, plot_x, item);
+    handle_bar_chart_interaction(channel, resp.response, plot_x, item);
 }
 
-fn handle_bar_plot_interaction(
+fn handle_bar_chart_interaction(
     channel: &Sender<ControlMessage>,
     response: egui::Response,
     plot_x: f32,
     item: &mut Item,
 ) {
-    let response = response.on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
     let drag_distance = response.drag_delta().x;
     if drag_distance != 0.0 {
         let duration = item.duration as f32;
@@ -291,7 +324,6 @@ fn preview_files_being_dropped(ctx: &egui::Context) {
     }
 }
 
-
 fn render_search_bar(model: &mut RwLockWriteGuard<Model>, ui: &mut egui::Ui) {
     let search_field =
         egui::TextEdit::singleline(&mut model.search_query).hint_text("type to search");
@@ -314,25 +346,6 @@ fn render_search_bar(model: &mut RwLockWriteGuard<Model>, ui: &mut egui::Ui) {
     }
 }
 
-fn render_items(
-    model: &mut RwLockWriteGuard<Model>,
-    channel: &Sender<ControlMessage>,
-    ui: &mut egui::Ui,
-) {
-    let lowercase_query = model.search_query.to_lowercase();
-    let pat: Vec<_> = lowercase_query.split_ascii_whitespace().collect();
-    for item in model
-        .items
-        .iter_mut()
-        .filter(|item| pat.iter().all(|w| item.name.to_lowercase().contains(w)))
-    {
-        render_item_frame(channel, ui, item);
-        if ui.available_size_before_wrap().x < BAR_PLOT_WIDTH {
-            ui.end_row();
-        }
-    }
-}
-
 fn render_import_progress(
     rx: &Receiver<ImportMessage>,
     state: SharedImportStatus,
@@ -351,8 +364,12 @@ fn render_import_progress(
         .show(ui.ctx(), |ui| {
             let mut state = state.write();
 
-            if let Ok(msg) = rx.try_recv() {
+            let start_time = std::time::Instant::now();
+            while let Ok(msg) = rx.try_recv() {
                 crate::import::process_import_message(msg, ui, &mut keep_window_open, &mut state);
+                if start_time.elapsed() > std::time::Duration::from_millis(30) {
+                    break;
+                }
             }
 
             ui.vertical(|ui| {
@@ -365,11 +382,16 @@ fn render_import_progress(
                     ui.horizontal(|ui| {
                         match status {
                             ItemImportStatus::Queued(_) => (),
+                            ItemImportStatus::Waiting => {
+                                ui.label("…")
+                                    .on_hover_text_at_pointer("waiting to begin processing…");
+                            }
                             ItemImportStatus::InProgress => {
-                                ui.spinner();
+                                ui.spinner().on_hover_text_at_pointer("processing…");
                             }
                             ItemImportStatus::Finished => {
-                                ui.colored_label(GREEN, "✔");
+                                ui.colored_label(GREEN, "✔")
+                                    .on_hover_text_at_pointer("finished");
                             }
                             ItemImportStatus::Failed(err) => {
                                 ui.colored_label(RED, "🗙").on_hover_text_at_pointer(err);
@@ -380,10 +402,16 @@ fn render_import_progress(
                 }
 
                 ui.horizontal(|ui| {
-                    if ui.button(RichText::new("Discard").color(RED)).clicked() {
+                    if ui
+                        .button(RichText::new("Discard").heading().color(RED))
+                        .clicked()
+                    {
                         keep_window_open = false;
                     }
-                    if ui.button(RichText::new("Import").color(GREEN)).clicked() {
+                    if ui
+                        .button(RichText::new("Import").heading().color(GREEN))
+                        .clicked()
+                    {
                         keep_window_open = false;
                         imported = Some(state.1.drain(..).collect());
                     }

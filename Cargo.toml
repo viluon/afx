@@ -16,6 +16,7 @@ rgb = "0.8.34"
 serde = "1.0"
 serde_json = "1.0"
 symphonia = { version = "^0.5", features = ["isomp4"] }
+thread-priority = "0.10.0"
 tracing = "0.1.37"
 tracing-subscriber = "0.3.16"
 tracing-timing = "0.6.0"
