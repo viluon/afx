@@ -209,6 +209,9 @@ fn process_message(
             }
             let mut model = model.write();
             model.items.retain(|item| item.id != id);
+            model.playlists.iter_mut().for_each(|playlist| {
+                playlist.items.retain(|item| *item != id);
+            });
             Ok(())
         }
         ControlMessage::AddToPlaylist {

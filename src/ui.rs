@@ -122,40 +122,49 @@ impl<'a> UIState<'a> {
         }
     }
 
-    fn render_items(&mut self, ui: &mut egui::Ui) {
+    fn items(&mut self, ui: &mut egui::Ui) {
         let lowercase_query = self.model.search_query.to_lowercase();
         let pat: Vec<_> = lowercase_query.split_ascii_whitespace().collect();
-        let selected_playlist = self
-            .model
-            .selected_playlist
-            .map(|id| {
-                self.model
-                    .playlists
-                    .iter()
-                    .find(|p| p.id == id)
-                    .expect("selected playlist not found")
-            });
+        let selected_playlist = self.model.selected_playlist.map(|id| {
+            self.model
+                .playlists
+                .iter()
+                .find(|p| p.id == id)
+                .expect("selected playlist not found")
+        });
 
-        let filtered_ids = (selected_playlist
+        let filtered_ids = self.search_in_playlist(selected_playlist, pat);
+        self.items_scroll_area(ui, filtered_ids);
+    }
+
+    fn search_in_playlist(
+        &self,
+        selected_playlist: Option<&Playlist>,
+        pat: Vec<&str>,
+    ) -> Vec<(usize, u64)> {
+        let items = selected_playlist
             .map(|p| {
                 p.items
                     .iter()
                     .map(|id| self.model.items.iter().find(|i| i.id == *id).unwrap())
                     .collect()
             })
-            .unwrap_or(self.model.items.iter().collect::<Vec<_>>()))
-        .into_iter()
-        .enumerate()
-        .filter(|(_, item)| {
-            pat.iter()
-                .find(|w| "playing".starts_with(**w))
-                .filter(|_| item.status == ItemStatus::Playing)
-                .is_some()
-                || pat.iter().all(|w| item.name.to_lowercase().contains(w))
-        })
-        .map(|(pos, item)| (pos, item.id))
-        .collect::<Vec<_>>();
+            .unwrap_or(self.model.items.iter().collect::<Vec<_>>());
+        items
+            .into_iter()
+            .enumerate()
+            .filter(|(_, item)| {
+                pat.iter()
+                    .find(|w| "playing".starts_with(**w))
+                    .filter(|_| item.status == ItemStatus::Playing)
+                    .is_some()
+                    || pat.iter().all(|w| item.name.to_lowercase().contains(w))
+            })
+            .map(|(pos_within_playlist, item)| (pos_within_playlist, item.id))
+            .collect::<Vec<_>>()
+    }
 
+    fn items_scroll_area(&mut self, ui: &mut egui::Ui, filtered_ids: Vec<(usize, u64)>) {
         let items_per_row = (ui.available_width() / BAR_PLOT_WIDTH).floor() as usize;
         egui::ScrollArea::vertical()
             .auto_shrink([false; 2])
@@ -184,7 +193,13 @@ impl<'a> UIState<'a> {
                                     .items
                                     .binary_search_by_key(&item_id, |i| i.id)
                                     .unwrap();
-                                self.render_item_frame(position_within_playlist, ui, item_index);
+                                let item = &mut self.model.items[item_index];
+                                item.position = ui.ctx().animate_value_with_time(
+                                    egui::Id::new(item.id),
+                                    item.target_position as f32,
+                                    0.06,
+                                ) as f64;
+                                self.item_frame(position_within_playlist, ui, item_index);
                             }
                         });
                     }
@@ -192,58 +207,116 @@ impl<'a> UIState<'a> {
             );
     }
 
-    fn render_item_frame(
+    fn item_frame(
         &mut self,
         position_within_playlist: usize,
         ui: &mut egui::Ui,
         item_index: usize,
     ) {
-        let item = &mut self.model.items[item_index];
+        let Item { status, colour, .. } = &self.model.items[item_index];
+
         Frame::group(ui.style())
-            .stroke(if matches!(item.status, ItemStatus::Playing) {
+            .stroke(if matches!(status, ItemStatus::Playing) {
                 Stroke::new(1.0, Color32::WHITE)
             } else {
                 ui.style().visuals.widgets.noninteractive.bg_stroke
             })
-            .fill(item.colour.linear_multiply(0.03))
+            .fill(colour.linear_multiply(0.03))
             .show(ui, |ui| {
                 ui.vertical(|ui| {
+                    let item = &self.model.items[item_index];
+
                     ui.horizontal(|ui| {
                         let text = RichText::new(&item.name[0..32.min(item.name.len())])
                             .color(Color32::WHITE)
                             .heading();
                         ui.label(text).on_hover_text_at_pointer(&item.name);
                     });
+
                     render_bar_chart(position_within_playlist, &self.channel, ui, item);
+
                     ui.allocate_ui_with_layout(
                         vec2(0.0, 0.0),
                         egui::Layout::left_to_right(egui::Align::Center).with_main_justify(true),
                         |ui| {
-                            render_item_controls(&self.channel, ui, item);
+                            self.item_controls(ui, item_index);
                         },
                     );
                 });
             })
             .response
             .context_menu(|ui| {
-                ui.menu_button("Add to playlist", |ui| {
-                    for playlist in self.model.playlists.iter() {
-                        if ui.button(&playlist.name).clicked() {
-                            self.channel
-                                .send(ControlMessage::AddToPlaylist {
-                                    item_id: item.id,
-                                    playlist_id: playlist.id,
-                                })
-                                .unwrap();
-                            ui.close_menu();
-                        }
-                    }
-                });
-                if ui.button(RichText::new("Delete").color(RED)).clicked() {
-                    self.channel.send(ControlMessage::Delete(item.id)).unwrap();
+                self.item_context_menu(item_index, ui);
+            });
+    }
+
+    fn item_context_menu(&mut self, item_index: usize, ui: &mut egui::Ui) {
+        let item = &self.model.items[item_index];
+        ui.menu_button("Add to playlist", |ui| {
+            for playlist in self.model.playlists.iter() {
+                if ui.button(&playlist.name).clicked() {
+                    self.channel
+                        .send(ControlMessage::AddToPlaylist {
+                            item_id: item.id,
+                            playlist_id: playlist.id,
+                        })
+                        .unwrap();
                     ui.close_menu();
                 }
-            });
+            }
+        });
+        if ui.button(RichText::new("Delete").color(RED)).clicked() {
+            self.channel.send(ControlMessage::Delete(item.id)).unwrap();
+            ui.close_menu();
+        }
+    }
+
+    fn item_controls(&mut self, ui: &mut egui::Ui, item_index: usize) {
+        let item = &mut self.model.items[item_index];
+        match item.status {
+            ItemStatus::Stopped | ItemStatus::Paused => {
+                if ui.button(RichText::new("▶").heading()).clicked() {
+                    item.status = ItemStatus::Loading;
+                    self.channel.send(ControlMessage::Play(item.id)).unwrap();
+                }
+            }
+            ItemStatus::Loading => {
+                ui.spinner();
+            }
+            ItemStatus::Playing => {
+                if ui.button(RichText::new("⏸").heading()).clicked() {
+                    item.status = ItemStatus::Paused;
+                    self.channel.send(ControlMessage::Pause(item.id)).unwrap();
+                }
+            }
+        };
+
+        let loop_button = Button::new(if item.looped { "🔁" } else { "🔂" }).frame(item.looped);
+        if ui.add(loop_button).clicked() {
+            item.looped = !item.looped;
+            self.channel
+                .send(ControlMessage::Loop(item.id, item.looped))
+                .unwrap();
+        }
+
+        if ui.button(if item.muted { "🔇" } else { "🔈" }).clicked() {
+            item.muted = !item.muted;
+            self.channel
+                .send(ControlMessage::Mute(item.id, item.muted))
+                .unwrap();
+        }
+
+        let original_volume = item.volume;
+        ui.add(Slider::new(&mut item.volume, 0.0001..=1.0).show_value(false));
+        if original_volume != item.volume {
+            self.channel
+                .send(ControlMessage::SetVolume(item.id, item.volume))
+                .unwrap();
+        }
+
+        let minutes = (item.position / 60.0).floor() as u32;
+        let seconds = item.position % 60.0;
+        ui.label(format!("{:01}:{:05.2}", minutes, seconds));
     }
 
     fn add_items(&mut self, items: Vec<Item>) {
@@ -295,7 +368,7 @@ impl SharedModel {
             );
 
             ui.vertical(|ui| {
-                state.render_items(ui);
+                state.items(ui);
             })
         });
 
@@ -303,67 +376,15 @@ impl SharedModel {
     }
 }
 
-fn render_item_controls(channel: &Sender<ControlMessage>, ui: &mut egui::Ui, item: &mut Item) {
-    match item.status {
-        ItemStatus::Stopped | ItemStatus::Paused => {
-            if ui.button(RichText::new("▶").heading()).clicked() {
-                item.status = ItemStatus::Loading;
-                channel.send(ControlMessage::Play(item.id)).unwrap();
-            }
-        }
-        ItemStatus::Loading => {
-            ui.spinner();
-        }
-        ItemStatus::Playing => {
-            if ui.button(RichText::new("⏸").heading()).clicked() {
-                item.status = ItemStatus::Paused;
-                channel.send(ControlMessage::Pause(item.id)).unwrap();
-            }
-        }
-    };
-
-    let loop_button = Button::new(if item.looped { "🔁" } else { "🔂" }).frame(item.looped);
-    if ui.add(loop_button).clicked() {
-        item.looped = !item.looped;
-        channel
-            .send(ControlMessage::Loop(item.id, item.looped))
-            .unwrap();
-    }
-
-    if ui.button(if item.muted { "🔇" } else { "🔈" }).clicked() {
-        item.muted = !item.muted;
-        channel
-            .send(ControlMessage::Mute(item.id, item.muted))
-            .unwrap();
-    }
-
-    let original_volume = item.volume;
-    ui.add(Slider::new(&mut item.volume, 0.0001..=1.0).show_value(false));
-    if original_volume != item.volume {
-        channel
-            .send(ControlMessage::SetVolume(item.id, item.volume))
-            .unwrap();
-    }
-
-    let minutes = (item.position / 60.0).floor() as u32;
-    let seconds = item.position % 60.0;
-    ui.label(format!("{:01}:{:05.2}", minutes, seconds));
-}
-
 fn render_bar_chart(
     unique_id: usize,
     channel: &Sender<ControlMessage>,
     ui: &mut egui::Ui,
-    item: &mut Item,
+    item: &Item,
 ) {
     let id = format!("frequency graph for {}, {}", item.id, unique_id);
     let bg = ui.style().visuals.window_fill();
     let dimmed = bg.mix(0.4, &item.colour);
-
-    item.position =
-        ui.ctx()
-            .animate_value_with_time(egui::Id::new(item.id), item.target_position as f32, 0.06)
-            as f64;
 
     let plot_x = ui.cursor().left();
     let resp = Plot::new(id)
@@ -408,7 +429,7 @@ fn handle_bar_chart_interaction(
     channel: &Sender<ControlMessage>,
     response: egui::Response,
     plot_x: f32,
-    item: &mut Item,
+    item: &Item,
 ) {
     let drag_distance = response.drag_delta().x;
     if drag_distance != 0.0 {
