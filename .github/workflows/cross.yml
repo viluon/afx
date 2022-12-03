@@ -51,20 +51,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - run: cargo install cross --git https://github.com/cross-rs/cross
-      - name: setup mold
-        if: ${{ matrix.os == 'ubuntu-latest' }}
-        run: |
-          sudo apt-get install -y wget build-essential
-          ARCH=$(uname -m)
-          wget https://github.com/rui314/mold/releases/download/v1.7.1/mold-1.7.1-${ARCH}-linux.tar.gz
-          tar xzf mold-1.7.1-${ARCH}-linux.tar.gz
-          ls -lhFA mold-1.7.1-${ARCH}-linux
-          sudo cp mold-1.7.1-${ARCH}-linux/bin/mold /usr/bin
-      - run: ${{ matrix.command }} build --release --target ${{ matrix.target }}
+      - name: install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+      - name: build
+        run: ${{ matrix.command }} build --release --target ${{ matrix.target }}
       # 7z is available on all runners.
       # https://docs.github.com/en/actions/using-github-hosted-runners/about-github-hosted-runners#preinstalled-software
-      - name: Create archive
+      - name: create archive
         id: archive
         run: |
           DIRECTORY="afx-${{ github.ref_name }}-${{ matrix.build }}"
@@ -77,7 +70,7 @@ jobs:
           cp LICENSE README.md "target/${{ matrix.target }}/release/afx$SUFFIX" "$DIRECTORY"
           7z a "$DIRECTORY.zip" "$DIRECTORY"
           echo "path=$DIRECTORY.zip" >> $GITHUB_OUTPUT
-      - name: Upload artifact
+      - name: upload artifact
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload latest ${{ steps.archive.outputs.path }}
