@@ -32,9 +32,9 @@ jobs:
           ~/.cargo/git
           target/
         # An explicit key for restoring and saving the cache
-        key: ${{ runner.os }}-main-${{ hashFiles('**/Cargo.lock') }}
+        key: ${{ runner.os }}-build-nix-${{ github.ref_name }}-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: |
-          ${{ runner.os }}-main-
+          ${{ runner.os }}-build-nix-
     - name: build
       run: cargo build --verbose --release
     - name: compress executable
