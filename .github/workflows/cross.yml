@@ -19,16 +19,6 @@ jobs:
           # Include all "Tier 1 with Host Tools" targets and "Tier 2 with Host Tools" targets for Windows and macOS,
           # excluding *-pc-windows-msvc, which requires cross-toolchains. Goal is one option per OS per architecture.
           # https://doc.rust-lang.org/rustc/platform-support.html
-          # 32-bit (i686)
-          # i686-apple-darwin is Tier 3.
-          - build: linux-32-bit
-            os: ubuntu-latest
-            target: i686-unknown-linux-gnu
-            command: cross
-          - build: windows-32-bit
-            os: ubuntu-latest
-            target: i686-pc-windows-gnu
-            command: cross
           # 64-bit (x86)
           # macos-latest is x86_64.
           # https://docs.github.com/en/actions/using-github-hosted-runners/about-github-hosted-runners#supported-runners-and-hardware-resources
@@ -59,6 +49,15 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - run: cargo install cross --git https://github.com/cross-rs/cross
+      - name: setup mold
+        if: ${{ matrix.os == 'ubuntu-latest' }}
+        run: |
+          sudo apt-get install -y wget build-essential
+          ARCH=$(uname -m)
+          wget https://github.com/rui314/mold/releases/download/v1.7.1/mold-1.7.1-${ARCH}-linux.tar.gz
+          tar xzf mold-1.7.1-${ARCH}-linux.tar.gz
+          ls -lhFA mold-1.7.1-${ARCH}-linux
+          sudo cp mold-1.7.1-${ARCH}-linux/bin/mold /usr/bin
       - run: ${{ matrix.command }} build --release --target ${{ matrix.target }}
       # 7z is available on all runners.
       # https://docs.github.com/en/actions/using-github-hosted-runners/about-github-hosted-runners#preinstalled-software
@@ -77,4 +76,4 @@ jobs:
           echo "path=$DIRECTORY.zip" >> $GITHUB_OUTPUT
       - env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload ${{ github.ref_name }} ${{ steps.archive.outputs.path }}
+        run: gh release upload latest ${{ steps.archive.outputs.path }}
