@@ -1,0 +1,86 @@
+name: cross
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "latest"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create ${{ github.ref_name }} || exit 0
+  assets:
+    needs: release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # https://github.com/cross-rs/cross#supported-targets
+        include:
+          # Include all "Tier 1 with Host Tools" targets and "Tier 2 with Host Tools" targets for Windows and macOS,
+          # excluding *-pc-windows-msvc, which requires cross-toolchains. Goal is one option per OS per architecture.
+          # https://doc.rust-lang.org/rustc/platform-support.html
+          # 32-bit (i686)
+          # i686-apple-darwin is Tier 3.
+          - build: linux-32-bit
+            os: ubuntu-latest
+            target: i686-unknown-linux-gnu
+            command: cross
+          - build: windows-32-bit
+            os: ubuntu-latest
+            target: i686-pc-windows-gnu
+            command: cross
+          # 64-bit (x86)
+          # macos-latest is x86_64.
+          # https://docs.github.com/en/actions/using-github-hosted-runners/about-github-hosted-runners#supported-runners-and-hardware-resources
+          - build: linux-64-bit
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            command: cross
+          - build: macos-64-bit
+            os: macos-latest
+            target: x86_64-apple-darwin
+            command: cargo
+          - build: windows-64-bit
+            os: ubuntu-latest
+            target: x86_64-pc-windows-gnu
+            command: cross
+          # 64-bit (ARM)
+          # aarch64-apple-darwin is not available as a cross target or GitHub-hosted runner.
+          # https://github.com/cross-rs/cross-toolchains#apple-targets
+          # https://docs.github.com/en/actions/using-github-hosted-runners/about-github-hosted-runners#supported-runners-and-hardware-resources
+          # aarch64-pc-windows-gnullvm is Tier 3.
+          - build: linux-arm
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            command: cross
+    steps:
+      - uses: actions/checkout@v3
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo install cross --git https://github.com/cross-rs/cross
+      - run: ${{ matrix.command }} build --release --target ${{ matrix.target }}
+      # 7z is available on all runners.
+      # https://docs.github.com/en/actions/using-github-hosted-runners/about-github-hosted-runners#preinstalled-software
+      - name: Create archive
+        id: archive
+        run: |
+          DIRECTORY="afx-${{ github.ref_name }}-${{ matrix.build }}"
+          if [[ "${{ matrix.target }}" =~ "-pc-windows-" ]]; then
+            SUFFIX=".exe"
+          else
+            SUFFIX=""
+          fi
+          mkdir "$DIRECTORY"
+          cp LICENSE README.md "target/${{ matrix.target }}/release/afx$SUFFIX" "$DIRECTORY"
+          7z a "$DIRECTORY.zip" "$DIRECTORY"
+          echo "path=$DIRECTORY.zip" >> $GITHUB_OUTPUT
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload ${{ github.ref_name }} ${{ steps.archive.outputs.path }}
