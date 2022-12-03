@@ -71,6 +71,7 @@ jobs:
           7z a "$DIRECTORY.zip" "$DIRECTORY"
           echo "path=$DIRECTORY.zip" >> $GITHUB_OUTPUT
       - name: upload artifact
+        if: ${{ github.ref != 'refs/heads/setup/ci' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload latest ${{ steps.archive.outputs.path }}
