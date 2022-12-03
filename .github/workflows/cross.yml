@@ -61,6 +61,7 @@ jobs:
         id: archive
         run: |
           DIRECTORY="afx-${{ github.ref_name }}-${{ matrix.build }}"
+          DIRECTORY="${DIRECTORY//\//-}"
           if [[ "${{ matrix.target }}" =~ "-pc-windows-" ]]; then
             SUFFIX=".exe"
           else
@@ -71,6 +72,11 @@ jobs:
           7z a "$DIRECTORY.zip" "$DIRECTORY"
           echo "path=$DIRECTORY.zip" >> $GITHUB_OUTPUT
       - name: upload artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: ${{ matrix.build }}
+          path: ${{ steps.archive.outputs.path }}
+      - name: upload release asset
         if: ${{ github.ref != 'refs/heads/setup/ci' }}
         env:
           GH_TOKEN: ${{ github.token }}
