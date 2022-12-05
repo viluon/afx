@@ -57,6 +57,7 @@ jobs:
     - name: test
       run: cargo test --verbose --release
     - name: release
+      if: ${{ github.ref == 'refs/heads/main' }}
       uses: marvinpinto/action-automatic-releases@v1.2.1
       with:
         # GitHub secret token
