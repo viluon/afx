@@ -5,7 +5,7 @@ export DEBIAN_FRONTEND=noninteractive
 # install dependencies
 dpkg --add-architecture $CROSS_DEB_ARCH
 apt-get update
-apt-get install -y wget clang clang:$CROSS_DEB_ARCH build-essential build-essential:$CROSS_DEB_ARCH libgtk-3-dev:$CROSS_DEB_ARCH libasound2-dev:$CROSS_DEB_ARCH libfontconfig1-dev:$CROSS_DEB_ARCH
+apt-get install -y wget clang build-essential libgtk-3-dev:$CROSS_DEB_ARCH libasound2-dev:$CROSS_DEB_ARCH libfontconfig1-dev:$CROSS_DEB_ARCH
 
 # install mold
 ARCH=$(uname -m)
