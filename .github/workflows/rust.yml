@@ -32,7 +32,9 @@ jobs:
           ~/.cargo/git
           target/
         # An explicit key for restoring and saving the cache
-        key: main
+        key: ${{ runner.os }}-build-nix-${{ github.ref_name }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-build-nix-
     - name: build
       run: cargo build --verbose --release
     - name: compress executable
@@ -55,6 +57,7 @@ jobs:
     - name: test
       run: cargo test --verbose --release
     - name: release
+      if: ${{ github.ref == 'refs/heads/main' }}
       uses: marvinpinto/action-automatic-releases@v1.2.1
       with:
         # GitHub secret token

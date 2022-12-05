@@ -1,6 +1,9 @@
 name: cross
 
 on:
+  push:
+    branches:
+      - setup/ci
   workflow_run:
     workflows: ["Rust"]
     branches: ["main"]
@@ -9,7 +12,7 @@ on:
 
 jobs:
   assets:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.ref == 'refs/heads/setup/ci' }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -48,23 +51,29 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - run: cargo install cross --git https://github.com/cross-rs/cross
-      - name: setup mold
-        if: ${{ matrix.os == 'ubuntu-latest' }}
-        run: |
-          sudo apt-get install -y wget build-essential
-          ARCH=$(uname -m)
-          wget https://github.com/rui314/mold/releases/download/v1.7.1/mold-1.7.1-${ARCH}-linux.tar.gz
-          tar xzf mold-1.7.1-${ARCH}-linux.tar.gz
-          ls -lhFA mold-1.7.1-${ARCH}-linux
-          sudo cp mold-1.7.1-${ARCH}-linux/bin/mold /usr/bin
-      - run: ${{ matrix.command }} build --release --target ${{ matrix.target }}
+      - name: setup cache
+        uses: actions/cache@v3.0.11
+        with:
+          # A list of files, directories, and wildcard patterns to cache and restore
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          # An explicit key for restoring and saving the cache
+          key: ${{ runner.os }}-cross-${{ matrix.target }}-${{ github.ref_name }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cross-${{ matrix.target }}-
+      - name: install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+      - name: build
+        run: ${{ matrix.command }} build --release --target ${{ matrix.target }}
       # 7z is available on all runners.
       # https://docs.github.com/en/actions/using-github-hosted-runners/about-github-hosted-runners#preinstalled-software
-      - name: Create archive
+      - name: create archive
         id: archive
         run: |
           DIRECTORY="afx-${{ github.ref_name }}-${{ matrix.build }}"
+          DIRECTORY="${DIRECTORY//\//-}"
           if [[ "${{ matrix.target }}" =~ "-pc-windows-" ]]; then
             SUFFIX=".exe"
           else
@@ -74,6 +83,13 @@ jobs:
           cp LICENSE README.md "target/${{ matrix.target }}/release/afx$SUFFIX" "$DIRECTORY"
           7z a "$DIRECTORY.zip" "$DIRECTORY"
           echo "path=$DIRECTORY.zip" >> $GITHUB_OUTPUT
-      - env:
+      - name: upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ matrix.build }}
+          path: ${{ steps.archive.outputs.path }}
+      - name: upload release asset
+        if: ${{ github.ref != 'refs/heads/setup/ci' }}
+        env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload latest ${{ steps.archive.outputs.path }}

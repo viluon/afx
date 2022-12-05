@@ -1,0 +1,9 @@
+# cross pre-build hooks
+[build]
+pre-build = ".github/ci-deps.sh"
+
+[target.aarch64-unknown-linux-gnu]
+
+[target.x86_64-unknown-linux-gnu]
+
+[target.x86_64-pc-windows-gnu]
