@@ -1,6 +1,6 @@
 # cross pre-build hooks
 [build]
-pre-build = ".github/setup-mold-ubuntu.sh"
+pre-build = ".github/ci-deps.sh"
 
 [target.aarch64-unknown-linux-gnu]
 
