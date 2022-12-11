@@ -50,20 +50,22 @@ impl<'a> UIState<'a> {
             self.library_button(ui);
             ui.separator();
             self.playlist_list(ui);
-            ui.separator();
+            if !self.model.playlists.is_empty() {
+                ui.separator();
+            }
             self.add_playlist_button(ui);
         });
     }
 
     fn add_playlist_button(&mut self, ui: &mut egui::Ui) {
         let button = Button::new("➕ Add playlist").fill(GREEN.linear_multiply(0.1));
-        if ui.add(button).clicked() {
-            let playlist = Playlist {
+        if ui.add(button).clicked() && self.model.playlist_creation_state.is_none() {
+            self.model.playlist_creation_state = Some(Playlist {
                 id: self.model.fresh_id(),
                 name: "New playlist".to_string(),
+                description: "".to_string(),
                 items: vec![],
-            };
-            self.model.playlists.push(playlist);
+            });
         }
     }
 
@@ -100,7 +102,7 @@ impl<'a> UIState<'a> {
         }
     }
 
-    fn render_search_bar(&mut self, ui: &mut egui::Ui) {
+    fn search_bar(&mut self, ui: &mut egui::Ui) {
         let search_field =
             egui::TextEdit::singleline(&mut self.model.search_query).hint_text("type to search");
         let resp = ui.add(search_field);
@@ -123,6 +125,12 @@ impl<'a> UIState<'a> {
     }
 
     fn items(&mut self, ui: &mut egui::Ui) {
+        let filtered_ids = self.process_search();
+        self.items_scroll_area(ui, filtered_ids);
+    }
+
+    // TODO rename
+    fn process_search(&mut self) -> Vec<(usize, u64)> {
         let lowercase_query = self.model.search_query.to_lowercase();
         let pat: Vec<_> = lowercase_query.split_ascii_whitespace().collect();
         let selected_playlist = self.model.selected_playlist.map(|id| {
@@ -133,8 +141,7 @@ impl<'a> UIState<'a> {
                 .expect("selected playlist not found")
         });
 
-        let filtered_ids = self.search_in_playlist(selected_playlist, pat);
-        self.items_scroll_area(ui, filtered_ids);
+        self.search_in_playlist(selected_playlist, pat)
     }
 
     fn search_in_playlist(
@@ -226,31 +233,26 @@ impl<'a> UIState<'a> {
                 ui.vertical(|ui| {
                     let item = &self.model.items[item_index];
 
-                    ui.horizontal(|ui| {
-                        let text = RichText::new(&item.name[0..32.min(item.name.len())])
-                            .color(Color32::WHITE)
-                            .heading();
-                        ui.label(text).on_hover_text_at_pointer(&item.name);
-                    });
-
+                    render_item_name(ui, item);
                     render_bar_chart(position_within_playlist, &self.channel, ui, item);
 
-                    ui.allocate_ui_with_layout(
-                        vec2(0.0, 0.0),
-                        egui::Layout::left_to_right(egui::Align::Center).with_main_justify(true),
-                        |ui| {
-                            self.item_controls(ui, item_index);
-                        },
-                    );
+                    ui.horizontal(|ui| {
+                        self.item_controls(ui, item_index);
+                    });
                 });
             })
             .response
             .context_menu(|ui| {
-                self.item_context_menu(item_index, ui);
+                self.item_context_menu(position_within_playlist, item_index, ui);
             });
     }
 
-    fn item_context_menu(&mut self, item_index: usize, ui: &mut egui::Ui) {
+    fn item_context_menu(
+        &mut self,
+        pos_within_playlist: usize,
+        item_index: usize,
+        ui: &mut egui::Ui,
+    ) {
         let item = &self.model.items[item_index];
         ui.menu_button("Add to playlist", |ui| {
             for playlist in self.model.playlists.iter() {
@@ -265,6 +267,17 @@ impl<'a> UIState<'a> {
                 }
             }
         });
+        if let Some(playlist_id) = self.model.selected_playlist {
+            if ui.button("Remove from playlist").clicked() {
+                self.channel
+                    .send(ControlMessage::RemoveFromPlaylist {
+                        pos_within_playlist,
+                        playlist_id,
+                    })
+                    .unwrap();
+                ui.close_menu();
+            }
+        }
         if ui.button(RichText::new("Delete").color(RED)).clicked() {
             self.channel.send(ControlMessage::Delete(item.id)).unwrap();
             ui.close_menu();
@@ -292,7 +305,12 @@ impl<'a> UIState<'a> {
         };
 
         let loop_button = Button::new(if item.looped { "🔁" } else { "🔂" }).frame(item.looped);
-        if ui.add(loop_button).clicked() {
+        let resp = ui.add(loop_button).on_hover_text(if item.looped {
+            "Disable looping"
+        } else {
+            "Enable looping"
+        });
+        if resp.clicked() {
             item.looped = !item.looped;
             self.channel
                 .send(ControlMessage::Loop(item.id, item.looped))
@@ -319,9 +337,251 @@ impl<'a> UIState<'a> {
         ui.label(format!("{:01}:{:05.2}", minutes, seconds));
     }
 
-    fn add_items(&mut self, items: Vec<Item>) {
+    fn add_imported_items(&mut self, items: Vec<Item>) {
+        if let Some(playlist_id) = self.model.selected_playlist {
+            for item in items.iter() {
+                self.channel
+                    .send(ControlMessage::AddToPlaylist {
+                        item_id: item.id,
+                        playlist_id,
+                    })
+                    .unwrap();
+            }
+        }
         self.model.items.extend(items);
     }
+
+    fn playlist_creation_window(&mut self, ui: &mut egui::Ui) {
+        if let Some(playlist) = &self.model.playlist_creation_state {
+            let mut playlist = playlist.clone();
+
+            egui::Window::new("Create playlist")
+                .resizable(false)
+                .show(ui.ctx(), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Name:");
+                        ui.text_edit_singleline(&mut playlist.name);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Description:");
+                        egui::TextEdit::multiline(&mut playlist.description)
+                            .desired_rows(3)
+                            .show(ui);
+                    });
+
+                    self.model.playlist_creation_state = Some(playlist.clone());
+                    ui.horizontal(|ui| {
+                        if ui.button(RichText::new("Discard").heading()).clicked() {
+                            self.model.playlist_creation_state = None;
+                        } else if ui.button(RichText::new("Create").heading()).clicked() {
+                            self.model.playlists.push(playlist.clone());
+                            self.model.playlist_creation_state = None;
+                        }
+                    });
+                })
+        } else {
+            None
+        };
+    }
+
+    fn render_import_progress(
+        &mut self,
+        rx: &Receiver<ImportMessage>,
+        state: SharedImportState,
+        ui: &mut egui::Ui,
+    ) -> (bool, Option<Vec<Item>>) {
+        let mut keep_window_open = true;
+        let mut imported = None;
+        let mut state = state.write();
+
+        let title = format!(
+            "Import ({}/{})",
+            state
+                .items_in_progress
+                .iter()
+                .filter(|(_, _, s)| *s == ItemImportStatus::Finished)
+                .count(),
+            state.items_in_progress.len()
+        );
+
+        egui::Window::new(title)
+            .id(egui::Id::new("import window"))
+            .scroll2([false, true])
+            .resizable(false)
+            .default_pos(egui::Pos2::new(
+                ui.available_size_before_wrap().x / 2.0,
+                ui.available_size().y / 2.0,
+            ))
+            .show(ui.ctx(), |ui| {
+                let start_time = std::time::Instant::now();
+                while let Ok(msg) = rx.try_recv() {
+                    crate::import::process_import_message(
+                        msg,
+                        ui,
+                        &mut keep_window_open,
+                        &mut state,
+                    );
+                    if start_time.elapsed() > std::time::Duration::from_millis(30) {
+                        break;
+                    }
+                }
+
+                ui.vertical(|ui| {
+                    if state.items_in_progress.is_empty() {
+                        ui.vertical_centered(|ui| ui.heading("Waiting for file selection..."));
+                        return;
+                    }
+
+                    let mut finished = 0;
+                    for (_, name, status) in state.items_in_progress.iter() {
+                        show_import_progress_indicator(ui, status, &mut finished, name);
+                    }
+
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(RichText::new("Discard").heading().color(RED))
+                            .clicked()
+                        {
+                            keep_window_open = false;
+                        }
+                        let target = self.get_selected_playlist_name();
+                        let import_action =
+                            RichText::new(format!("Add {} tracks to {}", finished, target))
+                                .heading()
+                                .color(GREEN);
+                        if ui.button(import_action).clicked() {
+                            keep_window_open = false;
+                            imported = Some(state.finished.drain(..).collect());
+                        }
+                    });
+                });
+            });
+        (keep_window_open, imported)
+    }
+
+    fn get_selected_playlist_name(&self) -> &str {
+        if let Some(playlist_id) = self.model.selected_playlist {
+            &self
+                .model
+                .playlists
+                .iter()
+                .find(|p| p.id == playlist_id)
+                .unwrap()
+                .name
+        } else {
+            "library"
+        }
+    }
+
+    fn render_top_button_bar(&mut self, ui: &mut egui::Ui) -> [egui::Response; 5] {
+        let import_button = Button::new(RichText::new("Import").heading().color(Color32::BLACK))
+            .fill(Color32::GOLD);
+        let import_button_resp = ui.add(import_button);
+        let play_resp = ui.add(
+            Button::new(RichText::new("▶").heading().color(Color32::BLACK)).fill(
+                if self.model.selected_playlist.is_some() {
+                    Color32::GREEN
+                } else {
+                    Color32::GRAY
+                },
+            ),
+        );
+
+        let pause_resp = ui.add(
+            Button::new(RichText::new("⏸").heading().color(Color32::BLACK)).fill(Color32::YELLOW),
+        );
+        let stop_resp = ui.add(
+            Button::new(RichText::new("⏹").heading().color(Color32::BLACK)).fill(Color32::RED),
+        );
+        let search_to_playlist_resp = ui.add(
+            Button::new(RichText::new("into playlist")),
+        );
+
+        [import_button_resp, play_resp, pause_resp, stop_resp, search_to_playlist_resp]
+    }
+
+    fn handle_playback_control_buttons(
+        &mut self,
+        play_resp: egui::Response,
+        pause_resp: egui::Response,
+        stop_resp: egui::Response,
+    ) {
+        if let Some(id) = self.model.selected_playlist {
+            self.channel.send(ControlMessage::PlayFromPlaylist(id)).unwrap();
+        }
+        if pause_resp.clicked() {
+            self.channel.send(ControlMessage::GlobalPause).unwrap();
+        }
+        if stop_resp.clicked() {
+            self.channel.send(ControlMessage::GlobalStop).unwrap();
+        }
+    }
+
+    /// Create a new playlist from the current search.
+    fn playlist_from_search(&mut self) {
+        if self.model.playlist_creation_state.is_none() {
+            self.model.playlist_creation_state = Some(Playlist {
+                id: self.model.fresh_id(),
+                name: "new playlist".to_string(),
+                description: "".to_string(),
+                items: self.process_search().into_iter().map(|(_, item_id)| item_id).collect(),
+            });
+        }
+    }
+}
+
+fn render_item_name(ui: &mut egui::Ui, item: &Item) {
+    ui.vertical(|ui| {
+        ui.set_max_size(vec2(BAR_PLOT_WIDTH, 0.0));
+
+        let font_id = egui::TextStyle::Heading.resolve(ui.style());
+        let mut job = eframe::epaint::text::LayoutJob::single_section(
+            item.name.clone(),
+            egui::TextFormat {
+                font_id,
+                color: Color32::WHITE,
+                ..Default::default()
+            },
+        );
+
+        job.wrap = eframe::epaint::text::TextWrapping {
+            overflow_character: None,
+            break_anywhere: true,
+            max_rows: 1,
+            ..Default::default()
+        };
+
+        ui.label(job).on_hover_text_at_pointer(&item.name);
+    });
+}
+
+fn show_import_progress_indicator(
+    ui: &mut egui::Ui,
+    status: &ItemImportStatus,
+    finished: &mut i32,
+    name: &String,
+) {
+    ui.horizontal(|ui| {
+        match status {
+            ItemImportStatus::Queued(_) => (),
+            ItemImportStatus::Waiting => {
+                ui.label("…")
+                    .on_hover_text_at_pointer("waiting to begin processing…");
+            }
+            ItemImportStatus::InProgress => {
+                ui.spinner().on_hover_text_at_pointer("processing…");
+            }
+            ItemImportStatus::Finished => {
+                ui.colored_label(GREEN, "✔")
+                    .on_hover_text_at_pointer("finished");
+                *finished += 1;
+            }
+            ItemImportStatus::Failed(err) => {
+                ui.colored_label(RED, "🗙").on_hover_text_at_pointer(err);
+            }
+        }
+        ui.label(name);
+    });
 }
 
 impl SharedModel {
@@ -345,23 +605,29 @@ impl SharedModel {
                 vec2(ui.available_size_before_wrap().x, 0.0),
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
-                    state.render_search_bar(ui);
+                    state.search_bar(ui);
+                    state.playlist_creation_window(ui);
 
-                    let import_button =
-                        Button::new(RichText::new("Import").heading().color(Color32::BLACK))
-                            .fill(Color32::GOLD);
-                    if ui.add(import_button).clicked() && self.import_state.is_none() {
+                    let [import_button_response, play_resp, pause_resp, stop_resp, into_playlist_resp] =
+                        state.render_top_button_bar(ui);
+
+                    state.handle_playback_control_buttons(play_resp, pause_resp, stop_resp);
+                    if into_playlist_resp.clicked() {
+                        state.playlist_from_search();
+                    }
+
+                    if import_button_response.clicked() && self.import_state.is_none() {
                         self.begin_import();
                     }
                     if let Some((rx, import_state)) = &self.import_state {
                         let (keep_win_open, imported) =
-                            render_import_progress(rx, import_state.clone(), ui);
+                            state.render_import_progress(rx, import_state.clone(), ui);
                         if !keep_win_open {
                             self.import_state = None;
                         }
                         if let Some(items) = imported {
                             info!("importing {} items", items.len());
-                            state.add_items(items);
+                            state.add_imported_items(items);
                         }
                     }
                 },
@@ -485,92 +751,4 @@ fn preview_files_being_dropped(ctx: &egui::Context) {
             Color32::WHITE,
         );
     }
-}
-
-fn render_import_progress(
-    rx: &Receiver<ImportMessage>,
-    state: SharedImportState,
-    ui: &mut egui::Ui,
-) -> (bool, Option<Vec<Item>>) {
-    let mut keep_window_open = true;
-    let mut imported = None;
-    let mut state = state.write();
-
-    let title = format!(
-        "Import ({}/{})",
-        state
-            .items_in_progress
-            .iter()
-            .filter(|(_, _, s)| *s == ItemImportStatus::Finished)
-            .count(),
-        state.items_in_progress.len()
-    );
-
-    egui::Window::new(title)
-        .id(egui::Id::new("import window"))
-        .scroll2([false, true])
-        .resizable(false)
-        .default_pos(egui::Pos2::new(
-            ui.available_size_before_wrap().x / 2.0,
-            ui.available_size().y / 2.0,
-        ))
-        .show(ui.ctx(), |ui| {
-            let start_time = std::time::Instant::now();
-            while let Ok(msg) = rx.try_recv() {
-                crate::import::process_import_message(msg, ui, &mut keep_window_open, &mut state);
-                if start_time.elapsed() > std::time::Duration::from_millis(30) {
-                    break;
-                }
-            }
-
-            ui.vertical(|ui| {
-                if state.items_in_progress.is_empty() {
-                    ui.vertical_centered(|ui| ui.heading("Waiting for file selection..."));
-                    return;
-                }
-
-                let mut finished = 0;
-                for (_, name, status) in state.items_in_progress.iter() {
-                    ui.horizontal(|ui| {
-                        match status {
-                            ItemImportStatus::Queued(_) => (),
-                            ItemImportStatus::Waiting => {
-                                ui.label("…")
-                                    .on_hover_text_at_pointer("waiting to begin processing…");
-                            }
-                            ItemImportStatus::InProgress => {
-                                ui.spinner().on_hover_text_at_pointer("processing…");
-                            }
-                            ItemImportStatus::Finished => {
-                                ui.colored_label(GREEN, "✔")
-                                    .on_hover_text_at_pointer("finished");
-                                finished += 1;
-                            }
-                            ItemImportStatus::Failed(err) => {
-                                ui.colored_label(RED, "🗙").on_hover_text_at_pointer(err);
-                            }
-                        }
-                        ui.label(name);
-                    });
-                }
-
-                ui.horizontal(|ui| {
-                    if ui
-                        .button(RichText::new("Discard").heading().color(RED))
-                        .clicked()
-                    {
-                        keep_window_open = false;
-                    }
-                    let import_action =
-                        RichText::new(format!("Add {} tracks to library", finished))
-                            .heading()
-                            .color(GREEN);
-                    if ui.button(import_action).clicked() {
-                        keep_window_open = false;
-                        imported = Some(state.finished.drain(..).collect());
-                    }
-                });
-            });
-        });
-    (keep_window_open, imported)
 }

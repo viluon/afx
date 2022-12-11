@@ -100,6 +100,7 @@ fn create_item(tx: Sender<ImportMessage>, id: u64, path: String, name: String) -
         position: 0.0,
         target_position: 0.0,
         duration,
+        issues: vec![],
     };
     i.bars = visualise_samples(&static_sound.frames);
     tx.send(ImportMessage::Update(id, ItemImportStatus::Finished))
@@ -135,7 +136,7 @@ pub fn process_import_message(
             }
         },
         ImportMessage::Finished(v) => {
-            debug!("render_import_progress received {} items", v.len());
+            debug!("process_import_message received {} items", v.len());
             state.finished = v;
         }
     }

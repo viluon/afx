@@ -1,6 +1,12 @@
 # afx
 
-This thing is my attempt at a soundboard program.
+This thing is my attempt at a soundboard program. afx currently runs on
+Windows, Linux, and macOS, you can [download it
+here](https://github.com/viluon/afx/releases/tag/latest). New versions are not
+backwards-compatible, this will change with afx v1.0.0. I can only reliably
+test the Linux build for now, so support for other platforms is on a
+best-effort basis. Please help me improve afx by [opening an
+issue](https://github.com/viluon/afx/issues/new) when you encounter a bug!
 
 https://user-images.githubusercontent.com/7235381/204112926-93e98e67-3e9c-4bbb-be89-b4468943da80.mp4
 

@@ -15,7 +15,17 @@ pub enum ControlMessage {
     Mute(u64, bool),
     SetVolume(u64, f64),
     Delete(u64),
-    AddToPlaylist { item_id: u64, playlist_id: u64 },
+    AddToPlaylist {
+        item_id: u64,
+        playlist_id: u64,
+    },
+    RemoveFromPlaylist {
+        pos_within_playlist: usize,
+        playlist_id: u64,
+    },
+    PlayFromPlaylist(u64),
+    GlobalPause,
+    GlobalStop,
 }
 
 #[derive(PartialEq, Debug, Clone)]
@@ -48,6 +58,25 @@ pub enum ItemStatus {
     Paused,
 }
 
+#[derive(PartialEq, Eq, Debug, Clone, Serialize, Deserialize)]
+pub enum Issue {
+    FileNotFound(String),
+}
+
+impl PartialOrd for Issue {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(match (self, other) {
+            (Issue::FileNotFound(a), Issue::FileNotFound(b)) => a.cmp(b),
+        })
+    }
+}
+
+impl Ord for Issue {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.partial_cmp(other).unwrap()
+    }
+}
+
 #[derive(PartialEq, Debug, Clone, Serialize, Deserialize)]
 pub struct Item {
     pub id: u64,
@@ -70,6 +99,7 @@ pub struct Item {
     /// Changes from elsewhere will be overwritten.
     pub target_position: f64,
     pub duration: f64,
+    pub issues: Vec<Issue>,
 }
 
 #[derive(PartialEq, Debug, Clone, Default, Serialize, Deserialize)]
@@ -77,7 +107,10 @@ pub struct Model {
     pub search_query: String,
     pub items: Vec<Item>,
     pub playlists: Vec<Playlist>,
+    pub playlist_creation_state: Option<Playlist>,
     pub selected_playlist: Option<u64>,
+    pub playing_playlist: Option<u64>,
+    pub shuffle: bool,
     pub id_counter: u64,
 }
 
@@ -92,6 +125,7 @@ impl Model {
 pub struct Playlist {
     pub id: u64,
     pub name: String,
+    pub description: String,
     pub items: Vec<u64>,
 }
 
@@ -99,6 +133,7 @@ pub struct ImportState {
     pub items_in_progress: Vec<(u64, String, ItemImportStatus)>,
     pub finished: Vec<Item>,
 }
+
 pub type SharedImportState = Arc<RwLock<ImportState>>;
 
 pub struct SharedModel {

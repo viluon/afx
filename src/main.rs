@@ -227,6 +227,53 @@ fn process_message(
             playlist.items.push(item_id);
             Ok(())
         }
+        ControlMessage::RemoveFromPlaylist {
+            pos_within_playlist,
+            playlist_id,
+        } => {
+            let mut model = model.write();
+            let playlist = model
+                .playlists
+                .iter_mut()
+                .find(|playlist| playlist.id == playlist_id)
+                .unwrap();
+            playlist.items.remove(pos_within_playlist);
+            Ok(())
+        }
+        ControlMessage::PlayFromPlaylist(id) => {
+            let mut model = model.write();
+            // TODO if another playlist is playing, stop it
+            // begin playback of the first item in the playlist
+            // TODO if the playlist is empty, do nothing
+
+            model.playing_playlist = Some(id);
+
+            Ok(())
+        }
+        ControlMessage::GlobalPause => {
+            let mut model = model.write();
+            for (id, handle) in handles.iter_mut() {
+                handle.pause(Tween::default())?;
+                model
+                    .items
+                    .iter_mut()
+                    .find(|item| item.id == *id)
+                    .unwrap()
+                    .status = ItemStatus::Paused;
+            }
+            Ok(())
+        }
+        ControlMessage::GlobalStop => {
+            let mut model = model.write();
+            for (id, handle) in handles.iter_mut() {
+                handle.stop(Tween::default())?;
+                let item = model.items.iter_mut().find(|item| item.id == *id).unwrap();
+                item.status = ItemStatus::Stopped;
+                item.target_position = 0.0;
+            }
+            handles.clear();
+            Ok(())
+        }
     }
 }
 
