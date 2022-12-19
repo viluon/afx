@@ -450,6 +450,8 @@ mod test {
 
     #[test]
     fn seek() -> Result<()> {
+        use approx::assert_relative_eq;
+
         let model = build_test_model();
         let mut manager = AudioManager::<CpalBackend>::new(AudioManagerSettings::default())?;
         let mut handles = HashMap::new();
@@ -461,11 +463,11 @@ mod test {
         std::thread::sleep(std::time::Duration::from_millis(100));
         assert_eq!(model.read().items[0].status, ItemStatus::Playing);
 
-        process_message(ControlMessage::Seek(0, 0.5), &rx, &mut manager, &mut handles, &model)?;
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        process_message(ControlMessage::Seek(0, 1.5), &rx, &mut manager, &mut handles, &model)?;
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        process_message(ControlMessage::SyncPlaybackStatus, &rx, &mut manager, &mut handles, &model)?;
         assert_eq!(model.read().items[0].status, ItemStatus::Playing);
-        assert_eq!(model.read().items[0].target_position, 0.5);
-        // TODO requires syncs
+        assert_relative_eq!(model.read().items[0].target_position, 1.5, epsilon = 0.5);
 
         Ok(())
     }
