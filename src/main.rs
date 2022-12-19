@@ -4,6 +4,7 @@ mod import;
 mod model;
 mod ui;
 
+use kira::manager::backend::Backend;
 use model::*;
 use ui::*;
 
@@ -99,10 +100,10 @@ fn process_control_messages(
     }
 }
 
-fn process_message(
+fn process_message<B: Backend>(
     msg: ControlMessage,
     tx: &Sender<ControlMessage>,
-    manager: &mut AudioManager,
+    manager: &mut AudioManager<B>,
     handles: &mut HashMap<u64, StreamingSoundHandle<FromFileError>>,
     model: &Arc<RwLock<Model>>,
 ) -> Result<()> {
@@ -283,11 +284,11 @@ fn process_message(
     }
 }
 
-fn begin_playback(
+fn begin_playback<B: Backend>(
     model: &Arc<RwLock<Model>>,
     id: u64,
     mut edit_item: impl FnMut(u64, &mut dyn FnMut(&mut Item) -> String) -> Option<String>,
-    manager: &mut AudioManager,
+    manager: &mut AudioManager<B>,
 ) -> Result<StreamingSoundHandle<FromFileError>> {
     let (file, position, looped, muted, volume) = {
         let model = model.read();
@@ -326,6 +327,10 @@ fn begin_playback(
 mod test {
     use super::*;
     use eframe::epaint::Color32;
+
+    fn mock_audio_manager() -> AudioManager<kira::manager::backend::mock::MockBackend> {
+        AudioManager::new(AudioManagerSettings::default()).unwrap()
+    }
 
     fn build_test_model() -> Model {
         let path = "samples/416529__inspectorj__bird-whistling-single-robin-a.wav".to_string();
@@ -376,7 +381,7 @@ mod test {
             m.items[0].stems[0].path = path;
             m
         };
-        let mut manager = AudioManager::<CpalBackend>::new(AudioManagerSettings::default())?;
+        let mut manager = mock_audio_manager();
         let mut handles = HashMap::new();
 
         let msg = ControlMessage::Play(0);
@@ -399,7 +404,7 @@ mod test {
     #[test]
     fn play_and_pause() -> Result<()> {
         let model = build_test_model();
-        let mut manager = AudioManager::<CpalBackend>::new(AudioManagerSettings::default())?;
+        let mut manager = mock_audio_manager();
         let mut handles = HashMap::new();
 
         let model = Arc::new(RwLock::new(model));
@@ -419,7 +424,7 @@ mod test {
     #[test]
     fn play_many() -> Result<()> {
         let model = build_test_model();
-        let mut manager = AudioManager::<CpalBackend>::new(AudioManagerSettings::default())?;
+        let mut manager = mock_audio_manager();
         let mut handles = HashMap::new();
 
         let model = Arc::new(RwLock::new(model));
@@ -448,6 +453,7 @@ mod test {
         Ok(())
     }
 
+    #[ignore = "requires a real audio backend, won't work in CI"]
     #[test]
     fn seek() -> Result<()> {
         use approx::assert_relative_eq;
