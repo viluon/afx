@@ -131,6 +131,10 @@ fn process_message(
         ControlMessage::Pause(id) => {
             if let Some(handle) = handles.get_mut(&id) {
                 handle.pause(Tween::default())?;
+                edit_item(id, &mut |item| {
+                    item.status = ItemStatus::Paused;
+                    String::new()
+                });
             }
             Ok(())
         }
@@ -323,6 +327,36 @@ mod test {
     use super::*;
     use eframe::epaint::Color32;
 
+    fn build_test_model() -> Model {
+        let path = "samples/416529__inspectorj__bird-whistling-single-robin-a.wav".to_string();
+        Model {
+            items: vec![
+                Item::with_default_stem(
+                    0,
+                    "test 0".to_string(),
+                    path.clone(),
+                    Color32::BLACK,
+                    1.0,
+                ),
+                Item::with_default_stem(
+                    1,
+                    "test 1".to_string(),
+                    path.clone(),
+                    Color32::BLACK,
+                    1.0,
+                ),
+                Item::with_default_stem(
+                    2,
+                    "test 2".to_string(),
+                    path,
+                    Color32::BLACK,
+                    1.0,
+                ),
+            ],
+            ..Model::default()
+        }
+    }
+
     #[test]
     fn file_not_found() -> Result<()> {
         // create a temporary directory and try to play a nonexistent file from it
@@ -337,15 +371,10 @@ mod test {
             tempdir.close()?;
             path
         };
-        let model = Model {
-            items: vec![Item::with_default_stem(
-                0,
-                "test".to_string(),
-                path,
-                Color32::BLACK,
-                1.0,
-            )],
-            ..Model::default()
+        let model = {
+            let mut m = build_test_model();
+            m.items[0].stems[0].path = path;
+            m
         };
         let mut manager = AudioManager::<CpalBackend>::new(AudioManagerSettings::default())?;
         let mut handles = HashMap::new();
@@ -364,6 +393,80 @@ mod test {
         assert_eq!(model.items[0].status, ItemStatus::Stopped);
         assert_eq!(model.items[0].issues.len(), 1);
         assert_eq!(model.items[0].issues[0].0, IssueType::MissingFile);
+        Ok(())
+    }
+
+    #[test]
+    fn play_and_pause() -> Result<()> {
+        let model = build_test_model();
+        let mut manager = AudioManager::<CpalBackend>::new(AudioManagerSettings::default())?;
+        let mut handles = HashMap::new();
+
+        let model = Arc::new(RwLock::new(model));
+        let (rx, _tx) = channel();
+
+        process_message(ControlMessage::Play(0), &rx, &mut manager, &mut handles, &model)?;
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(model.read().items[0].status, ItemStatus::Playing);
+
+        process_message(ControlMessage::Pause(0), &rx, &mut manager, &mut handles, &model)?;
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(model.read().items[0].status, ItemStatus::Paused);
+
+        Ok(())
+    }
+
+    #[test]
+    fn play_many() -> Result<()> {
+        let model = build_test_model();
+        let mut manager = AudioManager::<CpalBackend>::new(AudioManagerSettings::default())?;
+        let mut handles = HashMap::new();
+
+        let model = Arc::new(RwLock::new(model));
+        let (rx, _tx) = channel();
+
+        process_message(ControlMessage::Play(0), &rx, &mut manager, &mut handles, &model)?;
+        process_message(ControlMessage::Play(1), &rx, &mut manager, &mut handles, &model)?;
+        process_message(ControlMessage::Play(2), &rx, &mut manager, &mut handles, &model)?;
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(model.read().items[0].status, ItemStatus::Playing);
+        assert_eq!(model.read().items[1].status, ItemStatus::Playing);
+        assert_eq!(model.read().items[2].status, ItemStatus::Playing);
+
+        process_message(ControlMessage::GlobalPause, &rx, &mut manager, &mut handles, &model)?;
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(model.read().items[0].status, ItemStatus::Paused);
+        assert_eq!(model.read().items[1].status, ItemStatus::Paused);
+        assert_eq!(model.read().items[2].status, ItemStatus::Paused);
+
+        process_message(ControlMessage::GlobalStop, &rx, &mut manager, &mut handles, &model)?;
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(model.read().items[0].status, ItemStatus::Stopped);
+        assert_eq!(model.read().items[1].status, ItemStatus::Stopped);
+        assert_eq!(model.read().items[2].status, ItemStatus::Stopped);
+
+        Ok(())
+    }
+
+    #[test]
+    fn seek() -> Result<()> {
+        let model = build_test_model();
+        let mut manager = AudioManager::<CpalBackend>::new(AudioManagerSettings::default())?;
+        let mut handles = HashMap::new();
+
+        let model = Arc::new(RwLock::new(model));
+        let (rx, _tx) = channel();
+
+        process_message(ControlMessage::Play(0), &rx, &mut manager, &mut handles, &model)?;
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(model.read().items[0].status, ItemStatus::Playing);
+
+        process_message(ControlMessage::Seek(0, 0.5), &rx, &mut manager, &mut handles, &model)?;
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(model.read().items[0].status, ItemStatus::Playing);
+        assert_eq!(model.read().items[0].target_position, 0.5);
+        // TODO requires syncs
+
         Ok(())
     }
 }

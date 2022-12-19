@@ -53,3 +53,14 @@ works out of the box on Linux, which is a pretty niche subset.
     - a broken user interface, overlapping icons, poor contrast in dark mode
     - playback errors are silent
 
+### Licensing
+
+The source code of afx is free software under the terms of Affero GPL v3.
+However, this repository also contains audio samples not typically distributed
+with the binary builds of afx. These include:
+- [`Bird Whistling, Single, Robin,
+  A.wav`](samples/416529__inspectorj__bird-whistling-single-robin-a.wav) by
+  InspectorJ, obtained from
+  [Freesound](https://freesound.org/people/InspectorJ/sounds/416529/), licensed
+  under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). No changes
+  were made to this sample.
