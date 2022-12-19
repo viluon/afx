@@ -58,23 +58,16 @@ pub enum ItemStatus {
     Paused,
 }
 
-#[derive(PartialEq, Eq, Debug, Clone, Serialize, Deserialize)]
-pub enum Issue {
-    FileNotFound(String),
-}
+pub type Issue = (IssueType, String);
 
-impl PartialOrd for Issue {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(match (self, other) {
-            (Issue::FileNotFound(a), Issue::FileNotFound(b)) => a.cmp(b),
-        })
-    }
-}
-
-impl Ord for Issue {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.partial_cmp(other).unwrap()
-    }
+#[derive(PartialEq, Eq, PartialOrd, Ord, Debug, Clone, Serialize, Deserialize)]
+pub enum IssueType {
+    MissingFile,
+    InaccessibleFile,
+    PlaybackProblem,
+    LicensingIssue,
+    OtherError,
+    OtherWarning,
 }
 
 #[derive(PartialEq, Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +93,36 @@ pub struct Item {
     pub target_position: f64,
     pub duration: f64,
     pub issues: Vec<Issue>,
+}
+
+impl Item {
+    pub fn with_default_stem(
+        id: u64,
+        name: String,
+        path: String,
+        colour: Color32,
+        duration: f64,
+    ) -> Item {
+        Item {
+            id,
+            name,
+            stems: vec![Stem {
+                tag: "default".to_string(),
+                path,
+            }],
+            current_stem: 0,
+            volume: 1.0,
+            muted: false,
+            looped: false,
+            status: ItemStatus::Stopped,
+            colour,
+            bars: vec![],
+            position: 0.0,
+            target_position: 0.0,
+            duration,
+            issues: vec![],
+        }
+    }
 }
 
 #[derive(PartialEq, Debug, Clone, Default, Serialize, Deserialize)]

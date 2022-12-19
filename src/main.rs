@@ -22,6 +22,8 @@ use std::sync::Arc;
 use tracing::{info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
+use crate::import::classify_from_file_err;
+
 fn main() {
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::TRACE)
@@ -305,6 +307,8 @@ fn begin_playback(
         Err(err) => {
             edit_item(id, &mut |item| {
                 item.status = ItemStatus::Stopped;
+                let (msg, typ) = classify_from_file_err(&err);
+                item.issues.push((typ, msg));
                 String::new()
             });
             return Err(err.into());
@@ -312,4 +316,54 @@ fn begin_playback(
     };
     info!("passing {} to manager", file);
     Ok(manager.play(sound)?)
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use eframe::epaint::Color32;
+
+    #[test]
+    fn file_not_found() -> Result<()> {
+        // create a temporary directory and try to play a nonexistent file from it
+        let path = {
+            let tempdir = tempfile::tempdir()?;
+            let path = tempdir
+                .path()
+                .join("nonexistent.wav")
+                .to_str()
+                .unwrap()
+                .to_string();
+            tempdir.close()?;
+            path
+        };
+        let model = Model {
+            items: vec![Item::with_default_stem(
+                0,
+                "test".to_string(),
+                path,
+                Color32::BLACK,
+                1.0,
+            )],
+            ..Model::default()
+        };
+        let mut manager = AudioManager::<CpalBackend>::new(AudioManagerSettings::default())?;
+        let mut handles = HashMap::new();
+
+        let msg = ControlMessage::Play(0);
+
+        let model = Arc::new(RwLock::new(model));
+        let (rx, _tx) = channel();
+        #[allow(unused_must_use)]
+        {
+            process_message(msg, &rx, &mut manager, &mut handles, &model);
+        }
+
+        let model = &*model.read();
+
+        assert_eq!(model.items[0].status, ItemStatus::Stopped);
+        assert_eq!(model.items[0].issues.len(), 1);
+        assert_eq!(model.items[0].issues[0].0, IssueType::MissingFile);
+        Ok(())
+    }
 }

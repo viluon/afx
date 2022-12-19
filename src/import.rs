@@ -75,7 +75,7 @@ fn create_item(tx: Sender<ImportMessage>, id: u64, path: String, name: String) -
     let static_sound = match StaticSoundData::from_file(&path, StaticSoundSettings::new()) {
         Ok(sound) => sound,
         Err(e) => {
-            let msg = report_import_error(e);
+            let (msg, _) = classify_from_file_err(&e);
             warn!("failed to load {}: {}", path, msg);
             tx.send(ImportMessage::Update(id, ItemImportStatus::Failed(msg)))
                 .unwrap();
@@ -83,25 +83,13 @@ fn create_item(tx: Sender<ImportMessage>, id: u64, path: String, name: String) -
         }
     };
     let duration = static_sound.frames.len() as f64 / static_sound.sample_rate as f64;
-    let mut i = Item {
+    let mut i = Item::with_default_stem(
         id,
         name,
-        stems: vec![Stem {
-            tag: "default".to_string(),
-            path,
-        }],
-        current_stem: 0,
-        volume: 1.0,
-        muted: false,
-        looped: false,
-        status: ItemStatus::Stopped,
-        colour: PALETTE[id as usize % PALETTE.len()],
-        bars: vec![],
-        position: 0.0,
-        target_position: 0.0,
+        path,
+        PALETTE[id as usize % PALETTE.len()],
         duration,
-        issues: vec![],
-    };
+    );
     i.bars = visualise_samples(&static_sound.frames);
     tx.send(ImportMessage::Update(id, ItemImportStatus::Finished))
         .unwrap();
@@ -169,40 +157,69 @@ fn visualise_samples(frames: &[kira::dsp::Frame]) -> Vec<u8> {
         .collect()
 }
 
-fn report_import_error(e: FromFileError) -> String {
+pub fn classify_from_file_err(e: &FromFileError) -> (String, IssueType) {
     use std::io::ErrorKind;
     use symphonia::core::errors;
+    use IssueType::*;
+
+    fn describe_io_error(kind: ErrorKind) -> (String, IssueType) {
+        match kind {
+            ErrorKind::NotFound => ("the file could not be found".to_string(), MissingFile),
+            ErrorKind::PermissionDenied => (
+                "permission to read the file was denied".to_string(),
+                InaccessibleFile,
+            ),
+            kind => (format!("an IO error occurred: {}", kind), OtherError),
+        }
+    }
 
     match e {
-        FromFileError::NoDefaultTrack => "the file doesn't have a default track".to_string(),
-        FromFileError::UnknownSampleRate => "the sample rate could not be determined".to_string(),
-        FromFileError::UnsupportedChannelConfiguration => {
-            "the channel configuration of the file is not supported".to_string()
-        }
-        FromFileError::IoError(io_err) => match io_err.kind() {
-            ErrorKind::NotFound => "the file could not be found".to_string(),
-            ErrorKind::PermissionDenied => "permission to read the file was denied".to_string(),
-            kind => format!("an IO error occurred: {}", kind),
-        },
+        FromFileError::NoDefaultTrack => (
+            "the file doesn't have a default track".to_string(),
+            PlaybackProblem,
+        ),
+        FromFileError::UnknownSampleRate => (
+            "the sample rate could not be determined".to_string(),
+            PlaybackProblem,
+        ),
+        FromFileError::UnsupportedChannelConfiguration => (
+            "the channel configuration of the file is not supported".to_string(),
+            PlaybackProblem,
+        ),
+        FromFileError::IoError(io_err) => describe_io_error(io_err.kind()),
         FromFileError::SymphoniaError(symphonia_err) => match symphonia_err {
-            errors::Error::IoError(e) => format!("symphonia encountered an I/O error: {}", e),
-            errors::Error::DecodeError(e) => format!("symphonia could not decode the file: {}", e),
+            errors::Error::IoError(e) => describe_io_error(e.kind()),
+            errors::Error::DecodeError(e) => (
+                format!("symphonia could not decode the file: {}", e),
+                PlaybackProblem,
+            ),
             errors::Error::SeekError(e) => match e {
-                errors::SeekErrorKind::Unseekable => "this file is not seekable".to_string(),
-                errors::SeekErrorKind::ForwardOnly => {
-                    "this file can only be seeked forward".to_string()
+                errors::SeekErrorKind::Unseekable => {
+                    ("this file is not seekable".to_string(), PlaybackProblem)
                 }
-                errors::SeekErrorKind::OutOfRange => {
-                    "the seek timestamp is out of range".to_string()
+                errors::SeekErrorKind::ForwardOnly => (
+                    "this file can only be seeked forward".to_string(),
+                    PlaybackProblem,
+                ),
+                errors::SeekErrorKind::OutOfRange => (
+                    "the seek timestamp is out of range".to_string(),
+                    PlaybackProblem,
+                ),
+                errors::SeekErrorKind::InvalidTrack => {
+                    ("the track ID is invalid".to_string(), PlaybackProblem)
                 }
-                errors::SeekErrorKind::InvalidTrack => "the track ID is invalid".to_string(),
             },
-            errors::Error::Unsupported(e) => {
-                format!("symphonia does not support this format: {}", e)
+            errors::Error::Unsupported(e) => (
+                format!("symphonia does not support this format: {}", e),
+                PlaybackProblem,
+            ),
+            errors::Error::LimitError(e) => {
+                (format!("a limit error occurred: {}", e), PlaybackProblem)
             }
-            errors::Error::LimitError(e) => format!("a limit error occurred: {}", e),
-            errors::Error::ResetRequired => "symphonia requires a reset".to_string(),
+            errors::Error::ResetRequired => {
+                ("symphonia requires a reset".to_string(), PlaybackProblem)
+            }
         },
-        _ => "an unknown error occurred".to_string(),
+        _ => ("an unknown error occurred".to_string(), OtherError),
     }
 }

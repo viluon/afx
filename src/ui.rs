@@ -493,11 +493,15 @@ impl<'a> UIState<'a> {
         let stop_resp = ui.add(
             Button::new(RichText::new("⏹").heading().color(Color32::BLACK)).fill(Color32::RED),
         );
-        let search_to_playlist_resp = ui.add(
-            Button::new(RichText::new("into playlist")),
-        );
+        let search_to_playlist_resp = ui.add(Button::new(RichText::new("into playlist")));
 
-        [import_button_resp, play_resp, pause_resp, stop_resp, search_to_playlist_resp]
+        [
+            import_button_resp,
+            play_resp,
+            pause_resp,
+            stop_resp,
+            search_to_playlist_resp,
+        ]
     }
 
     fn handle_playback_control_buttons(
@@ -507,7 +511,9 @@ impl<'a> UIState<'a> {
         stop_resp: egui::Response,
     ) {
         if let Some(id) = self.model.selected_playlist {
-            self.channel.send(ControlMessage::PlayFromPlaylist(id)).unwrap();
+            self.channel
+                .send(ControlMessage::PlayFromPlaylist(id))
+                .unwrap();
         }
         if pause_resp.clicked() {
             self.channel.send(ControlMessage::GlobalPause).unwrap();
@@ -524,7 +530,11 @@ impl<'a> UIState<'a> {
                 id: self.model.fresh_id(),
                 name: "new playlist".to_string(),
                 description: "".to_string(),
-                items: self.process_search().into_iter().map(|(_, item_id)| item_id).collect(),
+                items: self
+                    .process_search()
+                    .into_iter()
+                    .map(|(_, item_id)| item_id)
+                    .collect(),
             });
         }
     }
