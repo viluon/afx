@@ -56,19 +56,23 @@ jobs:
         retention-days: 90
     - name: test
       run: cargo test --verbose --release
-    - name: release
+    - name: create release
       if: ${{ github.ref == 'refs/heads/main' }}
-      uses: marvinpinto/action-automatic-releases@v1.2.1
+      uses: softprops/action-gh-release@v1
+      id: create-release
       with:
-        # GitHub secret token
-        repo_token: "${{ secrets.GITHUB_TOKEN }}"
-        # Git tag (for automatic releases)
-        automatic_release_tag: latest
-        # Should this release be marked as a draft?
+        draft: true
         prerelease: true
-        # Release title (for automatic releases)
-        title: afx preview
-        # Assets to upload to the release
+        fail_on_unmatched_files: true
         files: |
           afx.upx
           target/release/afx
+        name: afx preview
+        tag_name: latest
+    - name: publish release
+      if: ${{ github.ref == 'refs/heads/main' }}
+      uses: eregon/publish-release@v1
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+      with:
+        release_id: ${{ steps.create-release.outputs.id }}
