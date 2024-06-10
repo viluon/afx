@@ -47,7 +47,7 @@ jobs:
             target: aarch64-unknown-linux-gnu
             command: cross
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
