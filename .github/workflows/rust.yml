@@ -56,8 +56,31 @@ jobs:
         retention-days: 90
     - name: test
       run: cargo test --verbose --release
+    - uses: actions/upload-artifact@v4
+      with:
+        name: binaries
+        path: |
+          afx.upx
+          target/release/afx
+  release:
+    needs: build-nix
+    if: ${{ github.ref == 'refs/heads/main' }}
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    steps:
+    - name: download artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: binaries
+        path: binaries/
+    - name: delete release
+      continue-on-error: true
+      run: gh release delete latest --cleanup-tag
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
     - name: create release
-      if: ${{ github.ref == 'refs/heads/main' }}
       uses: softprops/action-gh-release@v2
       id: create-release
       with:
@@ -65,12 +88,10 @@ jobs:
         prerelease: true
         fail_on_unmatched_files: true
         files: |
-          afx.upx
-          target/release/afx
+          release-files/*
         name: afx preview
         tag_name: latest
     - name: publish release
-      if: ${{ github.ref == 'refs/heads/main' }}
       uses: eregon/publish-release@v1
       env:
         GITHUB_TOKEN: ${{ github.token }}
