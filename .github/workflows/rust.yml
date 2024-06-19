@@ -42,26 +42,18 @@ jobs:
       with:
         version: v3.95
         args: --best --lzma --color -v -o afx.upx
-        file: target/release/afx
+        files: |
+          target/release/afx
     - name: upload build artifacts
       uses: actions/upload-artifact@v4
       with:
-        # Artifact name
-        name: Release binaries
-        # A file, directory or wildcard pattern that describes what to upload
-        path: |
-          target/release/afx
-          afx.upx
-        # The desired behavior if no files are found using the provided path.
+        name: binaries
         retention-days: 90
+        path: |
+          afx.upx
+          target/release/afx
     - name: test
       run: cargo test --verbose --release
-    - uses: actions/upload-artifact@v4
-      with:
-        name: binaries
-        path: |
-          afx.upx
-          target/release/afx
   release:
     needs: build-nix
     if: ${{ github.ref == 'refs/heads/main' }}
@@ -88,7 +80,7 @@ jobs:
         prerelease: true
         fail_on_unmatched_files: true
         files: |
-          release-files/*
+          binaries/*
         name: afx preview
         tag_name: latest
     - name: publish release
