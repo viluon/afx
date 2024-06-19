@@ -25,7 +25,7 @@ tracing-timing = "0.6.0"
 
 [dev-dependencies]
 approx = "0.5.1"
-tempfile = "3.3.0"
+tempfile = "3.10.1"
 
 [profile.release]
 codegen-units = 1
