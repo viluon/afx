@@ -64,6 +64,7 @@ jobs:
           target/release/afx
   release:
     needs: build-nix
+    if: ${{ github.ref == 'refs/heads/main' }}
     concurrency:
       group: release
       cancel-in-progress: false
@@ -80,7 +81,6 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ github.token }}
     - name: create release
-      if: ${{ github.ref == 'refs/heads/main' }}
       uses: softprops/action-gh-release@v2
       id: create-release
       with:
@@ -92,7 +92,6 @@ jobs:
         name: afx preview
         tag_name: latest
     - name: publish release
-      if: ${{ github.ref == 'refs/heads/main' }}
       uses: eregon/publish-release@v1
       env:
         GITHUB_TOKEN: ${{ github.token }}
