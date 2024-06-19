@@ -10,7 +10,7 @@ anyhow = "1.0"
 base64 = "0.22.1"
 eframe = { version = "0.20.1", features = ["persistence"] }
 kira = "0.7.1"
-lz4_flex = "0.9.5"
+lz4_flex = "0.11.3"
 parking_lot = "0.12"
 rayon = "1.6.0"
 rfd = "0.10.0"
