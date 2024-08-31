@@ -92,4 +92,4 @@ jobs:
         if: ${{ github.ref != 'refs/heads/setup/ci' }}
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload latest ${{ steps.archive.outputs.path }}
+        run: gh release upload latest ${{ steps.archive.outputs.path }} --clobber
