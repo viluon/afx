@@ -38,7 +38,7 @@ jobs:
     - name: build
       run: cargo build --verbose --release
     - name: compress executable
-      uses: crazy-max/ghaction-upx@v3.0.0
+      uses: crazy-max/ghaction-upx@v3.1.0
       with:
         version: v3.95
         args: --best --lzma --color -v -o afx.upx
