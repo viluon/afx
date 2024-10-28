@@ -52,7 +52,7 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - name: setup cache
-        uses: actions/cache@v4.1.1
+        uses: actions/cache@v4.1.2
         with:
           # A list of files, directories, and wildcard patterns to cache and restore
           path: |
