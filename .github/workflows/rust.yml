@@ -24,7 +24,7 @@ jobs:
       run: |
         sudo apt-get install -y libgdk-pixbuf2.0-dev libgtk-3-dev libasound2-dev libpulse-dev
     - name: setup cache
-      uses: actions/cache@v4.2.3
+      uses: actions/cache@v4.3.0
       with:
         # A list of files, directories, and wildcard patterns to cache and restore
         path: |
