@@ -45,7 +45,7 @@ jobs:
         files: |
           target/release/afx
     - name: upload build artifacts
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@v7
       with:
         name: binaries
         retention-days: 90
